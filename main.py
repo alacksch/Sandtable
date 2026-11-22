@@ -1,6 +1,11 @@
 """Run the SO-101 scene with the dummy sinusoidal controller."""
 
 import time
+import sys
+from pathlib import Path
+
+# Allow running directly from a source checkout without installing the package.
+sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 
 from simwrap.controller import DummyController
 from simwrap.sim import Sim

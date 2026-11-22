@@ -9,6 +9,32 @@ import numpy as np
 import viser
 
 from .sim import Sim
+from .camera import CameraRenderer
+from .objects import ObjectManager
+
+
+class AppState:
+    """Thread-safe prompt and run state shared with UI callbacks."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._prompt = ""
+        self._running = False
+
+    def set_prompt(self, prompt: str) -> None:
+        """Update the prompt text."""
+        with self._lock:
+            self._prompt = prompt
+
+    def set_running(self, running: bool) -> None:
+        """Set whether the requested policy run is active."""
+        with self._lock:
+            self._running = running
+
+    def snapshot(self) -> tuple[str, bool]:
+        """Return a consistent copy of the current app state."""
+        with self._lock:
+            return self._prompt, self._running
 
 
 def _quat_multiply(a: np.ndarray, b: np.ndarray) -> np.ndarray:
@@ -25,18 +51,35 @@ class SimulationUI:
     def __init__(self, sim: Sim, host: str = "0.0.0.0", port: int = 8080):
         """Start a viser server and build scene nodes from the simulation."""
         self.sim = sim
+        self.objects = ObjectManager(sim)
         self.server = viser.ViserServer(host=host, port=port)
         self.server.scene.set_up_direction("+z")
         self.server.initial_camera.position = (1.1, -1.35, 1.35)
         self.server.initial_camera.look_at = (0.0, 0.0, 0.78)
         self._nodes: list[tuple[Any, int, np.ndarray, np.ndarray]] = []
+        self._pool_nodes: dict[str, Any] = {}
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._paused = False
         self._status = self.server.gui.add_markdown("Physics: running")
+        self.app_state = AppState()
+        sim.set_app_state(self.app_state)
+        self._prompt_input = self.server.gui.add_text("Prompt", initial_value="", multiline=True)
+        self._prompt_input.on_update(lambda event: self.app_state.set_prompt(event.target.value))
+        self.server.gui.add_button("Run").on_click(lambda _: self._set_running(True))
+        self.server.gui.add_button("Stop").on_click(lambda _: self._set_running(False))
+        self._camera_renderer = CameraRenderer(sim)
+        self._camera_images = {
+            name: self.server.gui.add_image(np.zeros((360, 480, 3), dtype=np.uint8), label=f"Camera: {name}")
+            for name in ("front", "top")
+        }
         self._pause_button = self.server.gui.add_button("Pause physics")
         self.server.gui.add_button("Reset").on_click(lambda _: self._reset())
         self._pause_button.on_click(lambda _: self._toggle_pause())
+        self._object_kind = self.server.gui.add_dropdown("Shape", ("box", "cylinder", "sphere"), initial_value="box")
+        self.server.gui.add_button("Spawn object").on_click(lambda _: self._spawn_object())
+        self._object_buttons: dict[str, Any] = {}
+        self.server.gui.add_button("Clear all objects").on_click(lambda _: self._clear_objects())
         for geom in sim.get_geom_visual_data():
             self._add_geom(geom)
         self.server.scene.add_grid("grid", width=2.0, height=2.0, position=(0, 0, 0))
@@ -85,6 +128,10 @@ class SimulationUI:
         else:
             return
         self._nodes.append((node, int(geom["body"]), pos, quat))
+        if bool(geom.get("is_pool", False)):
+            geom_name = str(geom["name"])
+            self._pool_nodes[geom_name.removesuffix("_geom")] = node
+            node.visible = False
 
     @staticmethod
     def _capsule_mesh(radius: float, half_length: float) -> tuple[np.ndarray, np.ndarray]:
@@ -115,6 +162,56 @@ class SimulationUI:
             mujoco.mju_rotVecQuat(rotated, local_pos, bq)
             node.position = bp + rotated
             node.wxyz = _quat_multiply(bq, local_quat)
+        active_slots = self.objects.active_slot_names()
+        slot_visuals = {str(slot["name"]): slot for slot in self.sim.get_object_pool()}
+        for slot_name, node in self._pool_nodes.items():
+            node.visible = slot_name in active_slots
+            slot = slot_visuals[slot_name]
+            size = np.asarray(slot["size"])
+            rgba = np.asarray(slot["rgba"])
+            node.color = tuple(np.clip(np.round(rgba[:3] * 255), 0, 255).astype(int))
+            node.opacity = float(np.clip(rgba[3], 0, 1))
+            kind = str(slot["kind"])
+            if kind == "box":
+                node.dimensions = 2 * size
+            elif kind == "cylinder":
+                node.radius = float(size[0])
+                node.height = 2 * float(size[1])
+            else:
+                node.radius = float(size[0])
+        self._refresh_object_list()
+
+    def _spawn_object(self) -> None:
+        """Spawn the selected shape above the table center."""
+        kind = self._object_kind.value
+        try:
+            name = self.objects.spawn(kind, np.array((0.0, 0.0, 1.1)))
+        except RuntimeError as exc:
+            self._status.content = str(exc)
+            return
+        self._status.content = f"Spawned {name}"
+
+    def _refresh_object_list(self) -> None:
+        """Keep one delete button per active object."""
+        active = set(self.objects.list_active())
+        for name in tuple(self._object_buttons):
+            if name not in active:
+                self._object_buttons.pop(name).remove()
+        for name in self.objects.list_active():
+            if name not in self._object_buttons:
+                button = self.server.gui.add_button(f"Delete {name}")
+                button.on_click(lambda _, object_name=name: self._delete_object(object_name))
+                self._object_buttons[name] = button
+
+    def _delete_object(self, name: str) -> None:
+        """Delete one active object."""
+        self.objects.delete(name)
+        self._refresh_object_list()
+
+    def _clear_objects(self) -> None:
+        """Delete every active object."""
+        self.objects.clear_all()
+        self._refresh_object_list()
 
     def start(self) -> None:
         """Start the 30 Hz scene update loop."""
@@ -127,7 +224,15 @@ class SimulationUI:
     def _render_loop(self) -> None:
         while not self._stop_event.is_set():
             self.update_once()
-            self._stop_event.wait(1 / 30)
+            for name, image in self._camera_renderer.get_images().items():
+                self._camera_images[name].image = image
+            prompt, running = self.app_state.snapshot()
+            state = "running" if running else "stopped"
+            self._status.content = f"Physics: {'paused' if self._paused else 'running'}  \nPolicy: {state}  \nPrompt: {prompt or '(empty)'}"
+            self._stop_event.wait(1 / 10)
+
+    def _set_running(self, running: bool) -> None:
+        self.app_state.set_running(running)
 
     def _toggle_pause(self) -> None:
         if self._paused:
@@ -142,6 +247,7 @@ class SimulationUI:
             self._status.content = "Physics: paused"
 
     def _reset(self) -> None:
+        self.objects.clear_all()
         self.sim.reset()
         self._status.content = "Physics: paused" if self._paused else "Physics: running (reset)"
 
@@ -150,4 +256,5 @@ class SimulationUI:
         self._stop_event.set()
         if self._thread is not None:
             self._thread.join()
+        self._camera_renderer.close()
         self.server.stop()

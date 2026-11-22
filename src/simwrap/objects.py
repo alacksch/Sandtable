@@ -1,0 +1,62 @@
+"""Management of precompiled scene object slots."""
+
+from typing import Any
+
+import numpy as np
+
+from .sim import Sim
+
+
+class ObjectManager:
+    """Allocate and control scene objects without direct model access."""
+
+    def __init__(self, sim: Sim):
+        """Build a name-to-slot registry over the compiled scene pool."""
+        self.sim = sim
+        self._slots = sim.get_object_pool()
+        self._active: dict[str, dict[str, Any]] = {}
+        self._free = list(self._slots)
+        self._counter = 0
+
+    def spawn(self, kind: str, pos: np.ndarray, quat: np.ndarray | None = None,
+              size: np.ndarray | None = None, color: np.ndarray | None = None) -> str:
+        """Activate an available slot and return its unique object name."""
+        if kind not in {"box", "cylinder", "sphere"}:
+            raise ValueError(f"Unsupported object kind: {kind}")
+        slot_index = next((i for i, slot in enumerate(self._free) if slot["kind"] == kind), None)
+        if slot_index is None:
+            raise RuntimeError(f"Object pool exhausted for {kind} (capacity: {sum(s['kind'] == kind for s in self._slots)})")
+        slot = self._free.pop(slot_index)
+        name = f"{kind}_{self._counter}"
+        self._counter += 1
+        self.sim.activate_object_slot(
+            int(slot["joint_id"]), int(slot["geom_id"]), np.asarray(pos),
+            np.asarray((1, 0, 0, 0) if quat is None else quat),
+            slot["size"] if size is None else size,
+            slot["rgba"] if color is None else color,
+        )
+        self._active[name] = slot
+        return name
+
+    def delete(self, name: str) -> None:
+        """Deactivate a named object and return its slot to the pool."""
+        if name not in self._active:
+            raise KeyError(f"No active object named {name!r}")
+        slot = self._active.pop(name)
+        slot_number = sum(s["kind"] == slot["kind"] for s in self._slots[:self._slots.index(slot)])
+        parked = np.array((20.0 + slot_number * 0.3, 20.0 + ("box", "cylinder", "sphere").index(slot["kind"]) * 2.0, -10.0))
+        self.sim.deactivate_object_slot(int(slot["joint_id"]), int(slot["geom_id"]), parked)
+        self._free.append(slot)
+
+    def list_active(self) -> list[str]:
+        """Return active object names in creation order."""
+        return list(self._active)
+
+    def active_slot_names(self) -> set[str]:
+        """Return pool slot names currently in use for renderer visibility."""
+        return {str(slot["name"]) for slot in self._active.values()}
+
+    def clear_all(self) -> None:
+        """Deactivate all active objects."""
+        for name in list(self._active):
+            self.delete(name)
