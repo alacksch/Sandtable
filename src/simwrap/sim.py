@@ -141,7 +141,7 @@ class Sim:
             return self.data.xpos[body_id].copy(), self.data.xquat[body_id].copy()
 
     def move_object_slot(self, joint_id: int, geom_id: int, pos: np.ndarray,
-                         quat: np.ndarray) -> None:
+                         quat: np.ndarray, commit: bool = True) -> None:
         """Commit a freejoint pose, reject interpenetration, and clear velocity.
 
         Placement is checked with MuJoCo's generated contacts after a temporary
@@ -183,6 +183,10 @@ class Sim:
                 self.data.qpos[qadr:qadr + 7] = old_pose
                 mujoco.mj_forward(self.model, self.data)
                 raise ValueError("Placement overlaps another object or the robot")
+            if not commit:
+                self.data.qpos[qadr:qadr + 7] = old_pose
+                mujoco.mj_forward(self.model, self.data)
+                return
             self.data.qvel[vadr:vadr + 6] = 0
             mujoco.mj_forward(self.model, self.data)
 
@@ -201,6 +205,7 @@ class Sim:
                     "id": geom_id,
                     "name": self.model.geom(geom_id).name or f"geom_{geom_id}",
                     "body": int(self.model.geom_bodyid[geom_id]),
+                    "body_name": self.model.body(int(self.model.geom_bodyid[geom_id])).name or "world",
                     "type": geom_type,
                     "size": self.model.geom_size[geom_id].copy(),
                     "pos": self.model.geom_pos[geom_id].copy(),
@@ -210,6 +215,7 @@ class Sim:
                 }
                 if geom_type == mujoco.mjtGeom.mjGEOM_MESH:
                     mesh_id = int(self.model.geom_dataid[geom_id])
+                    item["mesh_id"] = mesh_id
                     vert_start = int(self.model.mesh_vertadr[mesh_id])
                     vert_count = int(self.model.mesh_vertnum[mesh_id])
                     face_start = int(self.model.mesh_faceadr[mesh_id])
@@ -218,6 +224,11 @@ class Sim:
                     item["faces"] = self.model.mesh_face[face_start:face_start + face_count].copy()
                 result.append(item)
             return result
+
+    def get_body_count(self) -> int:
+        """Return the compiled body count under the simulation lock."""
+        with self.lock:
+            return int(self.model.nbody)
 
     def get_object_pool(self) -> list[dict[str, object]]:
         """Return pool slot identifiers and default geometry properties."""

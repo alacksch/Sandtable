@@ -63,6 +63,29 @@ class ObjectManager:
         slot = self._active[name]
         self.sim.move_object_slot(int(slot["joint_id"]), int(slot["geom_id"]), pos, quat)
 
+    def check_placement(self, pos: np.ndarray, quat: np.ndarray, *, kind: str | None = None,
+                        name: str | None = None) -> None:
+        """Validate a candidate pose without committing it."""
+        if name is not None:
+            slot = self._active.get(name)
+            if slot is None:
+                raise KeyError(f"No active object named {name!r}")
+        else:
+            slot = next((s for s in self._free if s["kind"] == kind), None)
+            if slot is None:
+                capacity = sum(s["kind"] == kind for s in self._slots)
+                raise RuntimeError(f"Object pool exhausted for {kind} (capacity: {capacity})")
+        self.sim.move_object_slot(int(slot["joint_id"]), int(slot["geom_id"]), pos, quat, commit=False)
+
+    def get_object(self, name: str) -> dict[str, Any]:
+        """Return an active object's metadata and current world pose."""
+        if name not in self._active:
+            raise KeyError(f"No active object named {name!r}")
+        slot = self._active[name]
+        pos, quat = self.pose(name)
+        return {"name": name, "kind": slot["kind"], "pos": pos, "quat": quat,
+                "size": np.asarray(slot["size"]).copy(), "color": np.asarray(slot["rgba"]).copy()}
+
     def pose(self, name: str) -> tuple[np.ndarray, np.ndarray]:
         """Return the current world pose for an active object."""
         if name not in self._active:

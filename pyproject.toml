@@ -12,6 +12,10 @@ dependencies = [
     "viser",
     "numpy",
     "pytest",
+    "fastapi",
+    "uvicorn[standard]",
+    "httpx",
+    "pillow",
 ]
 
 [tool.setuptools.packages.find]

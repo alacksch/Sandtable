@@ -2,6 +2,7 @@
 
 import time
 import sys
+import argparse
 from pathlib import Path
 
 # Allow running directly from a source checkout without installing the package.
@@ -13,11 +14,25 @@ from simwrap.ui import SimulationUI
 
 
 def main() -> None:
-    """Run the SO-101 simulation and viser browser viewer."""
+    """Run the simulation with the requested browser interface."""
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--ui", choices=("web", "viser"), default="viser")
+    args = parser.parse_args()
     sim = Sim()
+    sim.start()
+    if args.ui == "web":
+        import uvicorn
+        from simwrap.server import create_app
+        app = create_app(sim)
+        print("Web UI: http://localhost:8080")
+        try:
+            uvicorn.run(app, host="0.0.0.0", port=8080)
+        finally:
+            app.state.cameras.close()
+            sim.close()
+        return
     controller = DummyController(sim)
     ui = SimulationUI(sim)
-    sim.start()
     controller.start()
     ui.start()
     print("Viser viewer: http://localhost:8080")
