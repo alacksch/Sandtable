@@ -96,6 +96,38 @@ class Sim:
         with self.lock:
             return self.data.xpos.copy(), self.data.xquat.copy()
 
+    def get_geom_visual_data(self) -> list[dict[str, object]]:
+        """Return renderable geom descriptors and mesh data as owned copies."""
+        with self.lock:
+            result: list[dict[str, object]] = []
+            for geom_id in range(self.model.ngeom):
+                group = int(self.model.geom_group[geom_id])
+                # This SO-101 asset assigns visual geoms to group 2 and
+                # collision geoms to group 3. Keep standard scene geoms too.
+                if group == 3:
+                    continue
+                geom_type = int(self.model.geom_type[geom_id])
+                item: dict[str, object] = {
+                    "id": geom_id,
+                    "name": self.model.geom(geom_id).name or f"geom_{geom_id}",
+                    "body": int(self.model.geom_bodyid[geom_id]),
+                    "type": geom_type,
+                    "size": self.model.geom_size[geom_id].copy(),
+                    "pos": self.model.geom_pos[geom_id].copy(),
+                    "quat": self.model.geom_quat[geom_id].copy(),
+                    "rgba": self.model.geom_rgba[geom_id].copy(),
+                }
+                if geom_type == mujoco.mjtGeom.mjGEOM_MESH:
+                    mesh_id = int(self.model.geom_dataid[geom_id])
+                    vert_start = int(self.model.mesh_vertadr[mesh_id])
+                    vert_count = int(self.model.mesh_vertnum[mesh_id])
+                    face_start = int(self.model.mesh_faceadr[mesh_id])
+                    face_count = int(self.model.mesh_facenum[mesh_id])
+                    item["vertices"] = self.model.mesh_vert[vert_start:vert_start + vert_count].copy()
+                    item["faces"] = self.model.mesh_face[face_start:face_start + face_count].copy()
+                result.append(item)
+            return result
+
     def close(self) -> None:
         """Stop the physics thread."""
         self.stop()
