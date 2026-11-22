@@ -17,6 +17,7 @@ def main() -> None:
     """Run the simulation with the requested browser interface."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--ui", choices=("web", "viser"), default="viser")
+    parser.add_argument("--port", type=int, default=8080, help="HTTP port for the selected UI (default: 8080)")
     args = parser.parse_args()
     sim = Sim()
     sim.start()
@@ -24,18 +25,18 @@ def main() -> None:
         import uvicorn
         from simwrap.server import create_app
         app = create_app(sim)
-        print("Web UI: http://localhost:8080")
+        print(f"Web UI: http://localhost:{args.port}")
         try:
-            uvicorn.run(app, host="0.0.0.0", port=8080)
+            uvicorn.run(app, host="0.0.0.0", port=args.port)
         finally:
             app.state.cameras.close()
             sim.close()
         return
     controller = DummyController(sim)
-    ui = SimulationUI(sim)
+    ui = SimulationUI(sim, port=args.port)
     controller.start()
     ui.start()
-    print("Viser viewer: http://localhost:8080")
+    print(f"Viser viewer: http://localhost:{args.port}")
     try:
         while True:
             time.sleep(1)
