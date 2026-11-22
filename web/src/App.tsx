@@ -109,7 +109,7 @@ function objectPose(item:ObjectDescriptor, scene:SceneData, frames:Float32Array|
 }
 
 function GhostGizmo({item,scene,frames,snap,mode,request,onToast}:{item:ObjectDescriptor;scene:SceneData;frames:React.MutableRefObject<Float32Array|null>;snap:boolean;mode:'translate'|'rotate';request:(c:string,e?:Record<string,unknown>)=>Promise<unknown>;onToast:(message:string)=>void}) {
-  const ghost=useRef<THREE.Group>(null);const dragging=useRef(false);const changed=useRef(false);
+  const ghost=useRef<THREE.Group>(null!);const dragging=useRef(false);const changed=useRef(false);
   const half= item.kind==='box'?item.size[2]:item.kind==='cylinder'?item.size[1]:item.size[0];
   useFrame(()=>{if(!ghost.current)return;const pose=objectPose(item,scene,frames.current);if(!dragging.current){ghost.current.position.fromArray(pose.pos);ghost.current.quaternion.set(pose.quat[1],pose.quat[2],pose.quat[3],pose.quat[0]);}else if(snap&&mode==='translate')ghost.current.position.z=.75+half;});
   const finish=()=>{dragging.current=false;if(!ghost.current||!changed.current)return;changed.current=false;const q=ghost.current.quaternion;const quat=[q.w,q.x,q.y,q.z];const pos=ghost.current.position.toArray();request('move',{name:item.name,pos,quat}).catch(e=>onToast(e.message));};
