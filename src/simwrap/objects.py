@@ -77,15 +77,6 @@ class ObjectManager:
                 raise RuntimeError(f"Object pool exhausted for {kind} (capacity: {capacity})")
         self.sim.move_object_slot(int(slot["joint_id"]), int(slot["geom_id"]), pos, quat, commit=False)
 
-    def get_object(self, name: str) -> dict[str, Any]:
-        """Return an active object's metadata and current world pose."""
-        if name not in self._active:
-            raise KeyError(f"No active object named {name!r}")
-        slot = self._active[name]
-        pos, quat = self.pose(name)
-        return {"name": name, "kind": slot["kind"], "pos": pos, "quat": quat,
-                "size": np.asarray(slot["size"]).copy(), "color": np.asarray(slot["rgba"]).copy()}
-
     def list_objects(self) -> list[dict[str, Any]]:
         """Return active object descriptors without reading MuJoCo data directly."""
         return [{"name": name, "kind": str(slot["kind"]), "slot": str(slot["name"]),

@@ -5,19 +5,42 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
-import mujoco
 import numpy as np
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, Response, StreamingResponse
+from PIL import Image
 
 from .app_state import AppState
 from .camera import CameraRenderer
 from .objects import ObjectManager
 from .scene import OBJECT_POOL_COUNTS
 from .sim import Sim
+
+
+def _jpeg_bytes(image: np.ndarray) -> bytes:
+    """Encode an RGB camera frame as JPEG."""
+    buffer = io.BytesIO()
+    Image.fromarray(image).save(buffer, format="JPEG", quality=82)
+    return buffer.getvalue()
+
+
+async def _mjpeg_frames(cameras: CameraRenderer, name: str) -> AsyncIterator[bytes]:
+    """Yield the latest named camera frame as an MJPEG multipart part."""
+    while True:
+        image = cameras.get_images().get(name)
+        if image is None:
+            await asyncio.sleep(0.1)
+            continue
+        frame = _jpeg_bytes(image)
+        yield (b"--frame\r\nContent-Type: image/jpeg\r\n"
+               + f"Content-Length: {len(frame)}\r\n\r\n".encode("ascii")
+               + frame + b"\r\n")
+        await asyncio.sleep(0.1)
 
 
 def create_app(sim: Sim | None = None, objects: ObjectManager | None = None,
@@ -30,13 +53,21 @@ def create_app(sim: Sim | None = None, objects: ObjectManager | None = None,
     camera_renderer = cameras
     if camera_renderer is None:
         camera_renderer = CameraRenderer(simulation)
-    app = FastAPI(title="Sandtable API")
+    @asynccontextmanager
+    async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        """Release an API-owned camera renderer when the server shuts down."""
+        try:
+            yield
+        finally:
+            if cameras is None:
+                camera_renderer.close()
+
+    app = FastAPI(title="Sandtable API", lifespan=lifespan)
     app.state.sim = simulation
     app.state.objects = manager
     app.state.cameras = camera_renderer
     app.state.app_state = state
     app.state.paused = False
-    app.state.owns_camera = cameras is None
 
     @app.get("/api/scene")
     def scene() -> dict[str, Any]:
@@ -86,10 +117,18 @@ def create_app(sim: Sim | None = None, objects: ObjectManager | None = None,
         image = camera_renderer.get_images().get(name)
         if image is None:
             return Response(status_code=503)
-        from PIL import Image
-        buffer = io.BytesIO()
-        Image.fromarray(image).save(buffer, format="JPEG", quality=82)
-        return Response(buffer.getvalue(), media_type="image/jpeg", headers={"Cache-Control": "no-store"})
+        return Response(_jpeg_bytes(image), media_type="image/jpeg", headers={"Cache-Control": "no-store"})
+
+    @app.get("/api/camera/{name}.mjpg")
+    def camera_stream(name: str) -> Response:
+        """Stream a continuously refreshed camera feed using MJPEG."""
+        if name not in camera_renderer.cameras:
+            return Response(status_code=404)
+        return StreamingResponse(
+            _mjpeg_frames(camera_renderer, name),
+            media_type="multipart/x-mixed-replace; boundary=frame",
+            headers={"Cache-Control": "no-store, no-cache, must-revalidate", "Pragma": "no-cache"},
+        )
 
     @app.websocket("/ws")
     async def websocket(websocket: WebSocket) -> None:
@@ -129,11 +168,6 @@ def create_app(sim: Sim | None = None, objects: ObjectManager | None = None,
             if not candidate.is_relative_to(dist.resolve()) or not candidate.is_file():
                 candidate = dist / "index.html"
             return FileResponse(candidate)
-
-    @app.on_event("shutdown")
-    def shutdown() -> None:
-        if app.state.owns_camera:
-            camera_renderer.close()
 
     return app
 

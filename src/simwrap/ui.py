@@ -8,33 +8,10 @@ import mujoco
 import numpy as np
 import viser
 
-from .sim import Sim
+from .app_state import AppState
 from .camera import CameraRenderer
 from .objects import ObjectManager
-
-
-class AppState:
-    """Thread-safe prompt and run state shared with UI callbacks."""
-
-    def __init__(self) -> None:
-        self._lock = threading.Lock()
-        self._prompt = ""
-        self._running = False
-
-    def set_prompt(self, prompt: str) -> None:
-        """Update the prompt text."""
-        with self._lock:
-            self._prompt = prompt
-
-    def set_running(self, running: bool) -> None:
-        """Set whether the requested policy run is active."""
-        with self._lock:
-            self._running = running
-
-    def snapshot(self) -> tuple[str, bool]:
-        """Return a consistent copy of the current app state."""
-        with self._lock:
-            return self._prompt, self._running
+from .sim import Sim
 
 
 def _quat_multiply(a: np.ndarray, b: np.ndarray) -> np.ndarray:

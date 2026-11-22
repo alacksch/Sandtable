@@ -32,12 +32,12 @@ function useSocket(onState: (s: LiveState) => void) {
     if(socket.current?.readyState!==WebSocket.OPEN){reject(new Error('WebSocket is not connected'));return;}
     const id=crypto.randomUUID(); pending.current.set(id,{resolve,reject}); socket.current.send(JSON.stringify({id,command,...extra}));
   });
-  return { socket, frame, request };
+  return { frame, request };
 }
 
 function PlacementPreview({kind,request,onSpawn,onToast}:{kind:string|null;request:(c:string,e?:Record<string,unknown>)=>Promise<unknown>;onSpawn:(name:string)=>void;onToast:(message:string)=>void}) {
   const {camera,gl}=useThree(); const group=useRef<THREE.Group>(null); const mouse=useRef(new THREE.Vector2()); const position=useRef(new THREE.Vector3());
-  const inside=useRef(false); const valid=useRef(false); const lastCheck=useRef(0); const lastKey=useRef(''); const candidateKey=useRef(''); const down=useRef<[number,number]|null>(null); const dragged=useRef(false); const lastPlaced=useRef(0); const colorRef=useRef<THREE.MeshStandardMaterial>(null); const [accepted,setAccepted]=useState(false);
+  const inside=useRef(false); const lastCheck=useRef(0); const lastKey=useRef(''); const candidateKey=useRef(''); const down=useRef<[number,number]|null>(null); const dragged=useRef(false); const lastPlaced=useRef(0); const colorRef=useRef<THREE.MeshStandardMaterial>(null); const [accepted,setAccepted]=useState(false);
   const raycaster=useMemo(()=>new THREE.Raycaster(),[]); const plane=useMemo(()=>new THREE.Plane(new THREE.Vector3(0,0,1),-.75),[]);
   useEffect(()=>{const canvas=gl.domElement; const move=(event:PointerEvent)=>{const rect=canvas.getBoundingClientRect();mouse.current.set(((event.clientX-rect.left)/rect.width)*2-1,-((event.clientY-rect.top)/rect.height)*2+1);inside.current=event.clientX>=rect.left&&event.clientX<=rect.right&&event.clientY>=rect.top&&event.clientY<=rect.bottom;
       if(down.current&&Math.hypot(event.clientX-down.current[0],event.clientY-down.current[1])>6)dragged.current=true;};
@@ -48,11 +48,11 @@ function PlacementPreview({kind,request,onSpawn,onToast}:{kind:string|null;reque
     return()=>{window.removeEventListener('pointerdown',downEvent);window.removeEventListener('pointermove',move);window.removeEventListener('pointerup',up);canvas.removeEventListener('drop',drop);canvas.removeEventListener('dragover',over);};
   },[gl,kind,onSpawn,onToast,request]);
   useFrame(()=>{if(!kind||!group.current){if(group.current)group.current.visible=false;return;}group.current.visible=inside.current;
-    raycaster.setFromCamera(mouse.current,camera);const hit=raycaster.ray.intersectPlane(plane,new THREE.Vector3());if(!hit){valid.current=false;return;}
+    raycaster.setFromCamera(mouse.current,camera);const hit=raycaster.ray.intersectPlane(plane,new THREE.Vector3());if(!hit)return;
     const half=kind==='box'?.035:kind==='cylinder'?.04:.035;position.current.set(hit.x,hit.y,.75+half);group.current.position.copy(position.current);
-    const inTable=Math.abs(hit.x)<=.6&&Math.abs(hit.y)<=.45; if(!inTable){valid.current=false;setAccepted(false);return;}
+    const inTable=Math.abs(hit.x)<=.6&&Math.abs(hit.y)<=.45; if(!inTable){setAccepted(false);return;}
     const key=`${kind}:${hit.x.toFixed(2)}:${hit.y.toFixed(2)}`;candidateKey.current=key;const now=performance.now();
-    if(key!==lastKey.current&&now-lastCheck.current>120){lastKey.current=key;lastCheck.current=now;valid.current=false;request('check_placement',{kind,pos:position.current.toArray(),quat:[1,0,0,0]}).then(()=>{if(candidateKey.current===key){valid.current=true;setAccepted(true);}}).catch(()=>{if(candidateKey.current===key){valid.current=false;setAccepted(false);}});}
+    if(key!==lastKey.current&&now-lastCheck.current>120){lastKey.current=key;lastCheck.current=now;request('check_placement',{kind,pos:position.current.toArray(),quat:[1,0,0,0]}).then(()=>{if(candidateKey.current===key)setAccepted(true);}).catch(()=>{if(candidateKey.current===key)setAccepted(false);});}
     if(colorRef.current)colorRef.current.color.set(accepted&&inTable?'#4ee19b':'#ff4f58');
   });
   const previewMaterial=<meshStandardMaterial ref={colorRef} color="#ff4f58" transparent opacity={.42}/>;
@@ -102,6 +102,45 @@ function Scene({data, frames, objectSlots, selectedName, onSelect}:{data:SceneDa
   </>;
 }
 
+function InViewObjectsMonitor({objects,scene,frames,onChange}:{objects:ObjectDescriptor[];scene:SceneData;frames:React.MutableRefObject<Float32Array|null>;onChange:(items:ObjectDescriptor[])=>void}) {
+  const {camera}=useThree();
+  const frustum=useMemo(()=>new THREE.Frustum(),[]);
+  const viewProjection=useMemo(()=>new THREE.Matrix4(),[]);
+  const center=useMemo(()=>new THREE.Vector3(),[]);
+  const bounds=useMemo(()=>new THREE.Sphere(),[]);
+  const lastUpdate=useRef(0);
+  const lastNames=useRef('');
+  const geomBySlot=useMemo(()=>new Map(scene.geoms.filter(g=>g.is_pool).map(g=>[g.name.replace('_geom',''),g])),[scene]);
+  useFrame(()=>{
+    const now=performance.now();
+    if(now-lastUpdate.current<160||!frames.current)return;
+    lastUpdate.current=now;
+    camera.updateMatrixWorld();
+    viewProjection.multiplyMatrices(camera.projectionMatrix,camera.matrixWorldInverse);
+    frustum.setFromProjectionMatrix(viewProjection);
+    const visible=objects.filter(item=>{
+      const geom=geomBySlot.get(item.slot);
+      if(!geom)return false;
+      const offset=geom.body*7;
+      center.set(frames.current![offset],frames.current![offset+1],frames.current![offset+2]);
+      const radius=item.kind==='box'?Math.hypot(...item.size):item.kind==='cylinder'?Math.hypot(item.size[0],item.size[1]):item.size[0];
+      bounds.center.copy(center);
+      bounds.radius=radius;
+      return frustum.intersectsSphere(bounds);
+    });
+    const names=visible.map(item=>item.name).join('|');
+    if(names!==lastNames.current){lastNames.current=names;onChange(visible);}
+  });
+  return null;
+}
+
+function InViewObjectsList({objects,selectedName,onSelect}:{objects:ObjectDescriptor[];selectedName:string|null;onSelect:(name:string)=>void}) {
+  return <section className="scene-objects panel">
+    <div className="scene-objects-title"><b>IN VIEW</b><span>{objects.length}</span></div>
+    {objects.length===0?<p>No placed objects in view</p>:<div className="scene-object-rows">{objects.map(item=><button className={`scene-object-row ${selectedName===item.name?'selected':''}`} key={item.name} onClick={()=>onSelect(item.name)}><i className={`shape ${item.kind}`}/><span>{item.name}</span><small>{item.kind}</small></button>)}</div>}
+  </section>;
+}
+
 function objectPose(item:ObjectDescriptor, scene:SceneData, frames:Float32Array|null) {
   const geom=scene.geoms.find(g=>g.name===`${item.slot}_geom`);const offset=(geom?.body??0)*7;
   if(!frames||frames.length<offset+7)return {pos:[0,0,0],quat:[1,0,0,0]};
@@ -141,7 +180,7 @@ function Inspector({item,scene,frames,request,onToast,onDelete,snap,setSnap,mode
 
 export function App() {
   const [scene,setScene]=useState<SceneData|null>(null); const [live,setLive]=useState<LiveState>({active_objects:[],object_slots:[],prompt:'',running:false,status:'connecting'});
-  const [prompt,setPrompt]=useState(''); const [paused,setPaused]=useState(false); const [cameraOpen,setCameraOpen]=useState(true); const [placing,setPlacing]=useState<string|null>(null); const [toast,setToast]=useState('');const [selectedName,setSelectedName]=useState<string|null>(null);const [snap,setSnap]=useState(true);const [gizmoMode,setGizmoMode]=useState<'translate'|'rotate'>('translate');
+  const [prompt,setPrompt]=useState(''); const [paused,setPaused]=useState(false); const [cameraOpen,setCameraOpen]=useState(true); const [placing,setPlacing]=useState<string|null>(null); const [toast,setToast]=useState('');const [selectedName,setSelectedName]=useState<string|null>(null);const [inViewObjects,setInViewObjects]=useState<ObjectDescriptor[]>([]);const [snap,setSnap]=useState(true);const [gizmoMode,setGizmoMode]=useState<'translate'|'rotate'>('translate');
   const stableState=(s:LiveState)=>{setLive(s);setPrompt(s.prompt);}; const {frame,request}=useSocket(stableState);
   useEffect(()=>{fetch('/api/scene').then(r=>r.json()).then(setScene).catch(()=>setLive(s=>({...s,status:'API unavailable'})));},[]);
   const command=(command:string, extra:Record<string,unknown>={})=>request(command,extra).catch(e=>setToast(e.message));
@@ -151,13 +190,14 @@ export function App() {
   const deleteSelected=()=>{if(selectedName)request('delete',{name:selectedName}).then(()=>setSelectedName(null)).catch(e=>notify(e.message));};
   return <main className="app"><Canvas shadows camera={{position:[1.5,-1.8,1.5],fov:45}} onPointerMissed={()=>{if(!placing)setSelectedName(null);}} onCreated={({camera})=>{camera.up.set(0,0,1);camera.lookAt(0,0,.7);}}>
     <color attach="background" args={['#080c12']} /><ambientLight intensity={1.3}/><directionalLight position={[1,-2,3]} intensity={2.5} castShadow />
-    {scene&&<Suspense fallback={null}><Scene data={scene} frames={frame} objectSlots={live.object_slots??[]} selectedName={selectedName} onSelect={setSelectedName}/><PlacementPreview kind={placing} request={request} onSpawn={name=>{setPlacing(null);setSelectedName(name);notify(`Placed ${name}`);}} onToast={notify}/>{selected&&<GhostGizmo item={selected} scene={scene} frames={frame} snap={snap} mode={gizmoMode} request={request} onToast={notify}/>}</Suspense>}
+    {scene&&<Suspense fallback={null}><Scene data={scene} frames={frame} objectSlots={live.object_slots??[]} selectedName={selectedName} onSelect={setSelectedName}/><InViewObjectsMonitor objects={live.object_slots??[]} scene={scene} frames={frame} onChange={setInViewObjects}/><PlacementPreview kind={placing} request={request} onSpawn={name=>{setPlacing(null);setSelectedName(name);notify(`Placed ${name}`);}} onToast={notify}/>{selected&&<GhostGizmo item={selected} scene={scene} frames={frame} snap={snap} mode={gizmoMode} request={request} onToast={notify}/>}</Suspense>}
     <OrbitControls makeDefault target={[0,0,.7]} />
   </Canvas>
   <header className="prompt panel"><span className={`status ${live.running?'on':''}`}/><input value={prompt} onChange={e=>{setPrompt(e.target.value);command('set_prompt',{text:e.target.value});}} placeholder="Describe what the robot should do…"/><button className="primary" onClick={()=>command('run')}>Run</button><button onClick={()=>command('stop')}>Stop</button></header>
   <aside className="toolbar panel"><button onClick={()=>command('reset')}>↺ Reset</button><button onClick={()=>{command(paused?'resume':'pause');setPaused(!paused);}}>{paused?'▶ Resume':'Ⅱ Pause'}</button></aside>
+  <InViewObjectsList objects={inViewObjects} selectedName={selectedName} onSelect={setSelectedName}/>
   <section className="tray panel"><div className="tray-title"><b>OBJECTS</b><span>{placing?`Click the table to place ${placing}`:'Drag an object onto the table'}</span></div><div className="cards">{(['box','cylinder','sphere'] as const).map(kind=>{const pool=scene?.pool[kind];const count=live.active_objects.filter(n=>n.startsWith(`${kind}_`)).length;return <div className={`card ${pool&&count>=pool.capacity?'disabled':''}`} key={kind} draggable={!!pool&&count<pool.capacity} onDragStart={()=>setPlacing(kind)} onDragEnd={()=>window.setTimeout(()=>setPlacing(null),0)} onClick={()=>pool&&count<pool.capacity&&setPlacing(kind)}><i className={`shape ${kind}`}/><div><b>{kind}</b><small>{count}/{pool?.capacity??10} in scene</small></div></div>;})}</div></section>
-  <section className={`camera panel ${selected?'inspector-open':''}`}><button className="camera-toggle" onClick={()=>setCameraOpen(!cameraOpen)}>CAMERAS <span>{cameraOpen?'⌄':'⌃'}</span></button>{cameraOpen&&<div className="feeds"><img src="/api/camera/front.jpg"/><img src="/api/camera/top.jpg"/></div>}</section>
+  <section className={`camera panel ${selected?'inspector-open':''}`}><button className="camera-toggle" onClick={()=>setCameraOpen(!cameraOpen)}>CAMERAS <span>{cameraOpen?'⌄':'⌃'}</span></button>{cameraOpen&&<div className="feeds"><img src="/api/camera/front.mjpg"/><img src="/api/camera/top.mjpg"/></div>}</section>
   {selected&&scene&&<Inspector item={selected} scene={scene} frames={frame} request={request} onToast={notify} onDelete={deleteSelected} snap={snap} setSnap={setSnap} mode={gizmoMode} setMode={setGizmoMode}/>}
   <div className="connection">{live.status}</div>{toast&&<div className="toast panel">{toast}</div>}</main>;
 }

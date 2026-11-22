@@ -1,5 +1,6 @@
 """HTTP and websocket contract checks for the web transport."""
 
+import asyncio
 import json
 import sys
 from pathlib import Path
@@ -9,7 +10,7 @@ from fastapi.testclient import TestClient
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from simwrap.server import create_app
+from simwrap.server import _mjpeg_frames, create_app
 from simwrap.sim import Sim
 
 
@@ -18,7 +19,7 @@ class EmptyCameras:
     cameras = ("front", "top")
 
     def get_images(self):
-        return {}
+        return {name: np.zeros((16, 16, 3), dtype=np.uint8) for name in self.cameras}
 
 
 def test_scene_shape_and_websocket_pose_frame() -> None:
@@ -30,11 +31,26 @@ def test_scene_shape_and_websocket_pose_frame() -> None:
             assert {"geoms", "body_order", "pool", "collision_geom_rule"} <= scene.keys()
             assert all({"body_name", "type", "size", "pos", "quat", "rgba"} <= g.keys()
                        for g in scene["geoms"])
+            feed = client.get("/api/camera/front.jpg")
+            assert feed.status_code == 200
+            assert feed.headers["content-type"] == "image/jpeg"
             with client.websocket_connect("/ws") as ws:
                 frame = ws.receive_bytes()
                 assert len(frame) == len(scene["body_order"]) * 7 * 4
     finally:
         sim.close()
+
+
+def test_mjpeg_camera_stream_yields_live_frame_parts() -> None:
+    async def read_first_part() -> bytes:
+        stream = _mjpeg_frames(EmptyCameras(), "front")
+        first = await anext(stream)
+        await stream.aclose()
+        return first
+
+    part = asyncio.run(read_first_part())
+    assert part.startswith(b"--frame\r\nContent-Type: image/jpeg\r\n")
+    assert b"\xff\xd8" in part and b"\xff\xd9" in part
 
 
 def test_websocket_spawn_move_delete_and_pool_exhaustion() -> None:

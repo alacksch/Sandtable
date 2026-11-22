@@ -6,14 +6,14 @@
 - Collision-only geoms are skipped when `geom_group == 3`. That is the explicit convention used by the SO-101 asset; groups 0, 1, and 2 remain renderable.
 - Pose websocket frames contain seven little-endian float32 values per body, position (xyz) then MuJoCo quaternion (wxyz), in ascending compiled body id order.
 - Meshes are served as binary STL. Placement checks temporarily evaluate contact at the candidate pose and restore the prior qpos before returning.
-- FastAPI TestClient coverage verifies spawn, move, delete, pool exhaustion, scene JSON, and websocket pose frame length. Full suite: `pytest -q` (9 passed).
+- FastAPI TestClient coverage verifies spawn, move, delete, pool exhaustion, scene JSON, websocket pose frame length, and camera image output. Full suite: `pytest -q` (10 passed).
 
 ## U2 frontend shell
 
 - Added the Vite + React + TypeScript strict-mode app, with a 3D scene, body pose mutation from binary websocket frames, prompt controls, toolbar, shape tray, and camera panel.
 - The renderer uses MuJoCo geom type values verified from installed MuJoCo 4.0.1; mesh geoms load the API's binary STL through Three.js `STLLoader`.
 - `@types/three` is pinned to `^0.181.0`, matching the published DefinitelyTyped release for Three 0.181.x. `web/package-lock.json` locks the installed frontend dependency tree.
-- Frontend dependencies installed and `npm run build` passed. Production UI loaded at `http://localhost:8081`; `/api/scene` returned 49 geoms and 38 bodies, and both camera feeds loaded. Vite dev proxy returned HTTP 200 for `/` and `/api/scene` on port 5173.
+- Frontend dependencies installed and `npm run build` passed. Production UI loaded at `http://localhost:8081`; `/api/scene` returned 49 geoms and 38 bodies. Vite dev proxy returned HTTP 200 for `/` and `/api/scene` on port 5173.
 
 ## U3 tray placement
 
@@ -26,7 +26,15 @@
 - Selection uses one `selectedName` state. Active object names map to fixed pool slots from websocket state, so clicks and gizmos address each object by its name after any spawn order.
 - Added selection outlines, a ghost-only transform target, translation and Z-axis rotation modes, table snap, editable position/yaw, color and size controls, and Delete/Escape handling. New `update_object` commands change pool geom size/color only through ObjectManager and Sim methods.
 - The official Drei TransformControls docs/source confirm the `object` ref, `mode`, axis visibility, and mouse/object change callbacks used here. See [TransformControls docs](https://drei.docs.pmnd.rs/gizmos/transform-controls) and [Drei implementation](https://github.com/pmndrs/drei/blob/master/src/core/TransformControls.tsx). A non-null `Group` ref is required by the installed Drei type definitions.
-- The scripted interleaved move test (spawn A/B/C, move A/B/A, delete B, move C) passes with final pose assertions. Full backend suite: 9 passed.
+- The scripted interleaved move test (spawn A/B/C, move A/B/A, delete B, move C) passes with final pose assertions. Full backend suite: 10 passed.
+
+## Current direction and cleanup
+
+- The duplicate legacy `AppState` implementation was removed; viser and web now share `simwrap.app_state.AppState`. FastAPI camera cleanup uses a lifespan handler.
+- The camera panel now reads `/api/camera/{name}.mjpg`, a continuous 10 Hz MJPEG stream. The `.jpg` endpoint remains for one-off snapshots.
+- The `IN VIEW` panel lists active object bounds intersecting the Three.js camera frustum and selects an object when its row is clicked. Its React state changes only when the visible-name set changes.
+- Future policy control should use `Sim.get_observation()` and `Sim.apply_action()` through the existing application state boundary. The current `run` command only updates status.
+- The current object pool still spawns primitives. The renderer already handles mesh geoms; a future downloaded-object catalog/import step should provide stable object names and mesh assets through the existing scene/mesh API. Online asset import and model integration are not part of this cleanup.
 
 ### Manual web UI checklist
 
@@ -34,6 +42,7 @@
 2. Drag each tray shape onto the table; verify the preview follows the pointer, turns red over collisions/outside the table, and drop outside cancels. Repeat with click-card then click-table.
 3. Select A, B, then A again; move each with the gizmo and inspector, rotate yaw, edit size/color, and confirm other objects keep simulating.
 4. Delete a selected object with the button and Delete key; press Escape or click empty space to deselect. Exhaust a shape pool and confirm the card disables.
+5. Confirm `IN VIEW` changes as objects enter and leave the camera frustum, and that front/top feeds keep refreshing while the camera panel is open.
 
 ### Commands
 
