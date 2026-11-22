@@ -299,6 +299,24 @@ class Sim:
             self.model.geom_conaffinity[geom_id] = 0
             mujoco.mj_forward(self.model, self.data)
 
+    def update_object_geom(self, geom_id: int, size: np.ndarray | None = None,
+                           color: np.ndarray | None = None) -> None:
+        """Update supported object visual dimensions and RGBA under the Sim lock."""
+        dimensions = None if size is None else np.asarray(size, dtype=float)
+        rgba = None if color is None else np.asarray(color, dtype=float)
+        with self.lock:
+            if dimensions is not None:
+                expected = 3 if self.model.geom_type[geom_id] == mujoco.mjtGeom.mjGEOM_BOX else (
+                    2 if self.model.geom_type[geom_id] == mujoco.mjtGeom.mjGEOM_CYLINDER else 1)
+                if dimensions.shape != (expected,) or not np.isfinite(dimensions).all() or np.any(dimensions <= 0):
+                    raise ValueError(f"Size must contain {expected} positive finite values")
+                self.model.geom_size[geom_id, :expected] = dimensions
+            if rgba is not None:
+                if rgba.shape != (4,) or not np.isfinite(rgba).all() or np.any((rgba < 0) | (rgba > 1)):
+                    raise ValueError("Color must contain four values between 0 and 1")
+                self.model.geom_rgba[geom_id] = rgba
+            mujoco.mj_forward(self.model, self.data)
+
     def close(self) -> None:
         """Stop the physics thread."""
         self.stop()

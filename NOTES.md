@@ -19,3 +19,24 @@
 - Tray items can be dragged or selected before clicking the table. The preview raycasts against the table plane, places the shape on the surface, checks the table bounds, and asks the backend to validate contacts before spawning.
 - Placement checks temporarily enable the free slot geom's collisions under the Sim lock, then restore its pose and collision masks. A focused test verifies the check does not change body poses.
 - Visual overlap feedback is based on the websocket `check_placement` response. The backend still validates again immediately before spawn. Frontend execution/build remains unverified because npm is unavailable.
+
+## U4 select and move
+
+- Selection uses one `selectedName` state. Active object names map to fixed pool slots from websocket state, so clicks and gizmos address each object by its name after any spawn order.
+- Added selection outlines, a ghost-only transform target, translation and Z-axis rotation modes, table snap, editable position/yaw, color and size controls, and Delete/Escape handling. New `update_object` commands change pool geom size/color only through ObjectManager and Sim methods.
+- The official Drei TransformControls docs/source confirm the `object` ref, `mode`, axis visibility, and mouse/object change callbacks used here. See [TransformControls docs](https://drei.docs.pmnd.rs/gizmos/transform-controls) and [Drei implementation](https://github.com/pmndrs/drei/blob/master/src/core/TransformControls.tsx). The declared frontend is Drei 10.7.6; npm is unavailable here, so TypeScript/build verification remains pending.
+- The scripted interleaved move test (spawn A/B/C, move A/B/A, delete B, move C) passes with final pose assertions. The local backend tests pass (7 passed).
+
+### Manual web UI checklist
+
+1. Start the backend and confirm the arm/table render, front/top feeds load, and Run/Stop plus Pause/Resume update status.
+2. Drag each tray shape onto the table; verify the preview follows the pointer, turns red over collisions/outside the table, and drop outside cancels. Repeat with click-card then click-table.
+3. Select A, B, then A again; move each with the gizmo and inspector, rotate yaw, edit size/color, and confirm other objects keep simulating.
+4. Delete a selected object with the button and Delete key; press Escape or click empty space to deselect. Exhaust a shape pool and confirm the card disables.
+
+### Commands
+
+- Install backend dependencies: `python -m pip install -e .`
+- Run the production web UI: `python main.py --ui web`
+- Run the Vite development UI (in `web/`): `npm install` then `npm run dev`; start the backend separately with `python main.py --ui web`.
+- Build static frontend files (in `web/`): `npm install` then `npm run build`; then run `python main.py --ui web` from the repository root. FastAPI serves `web/dist` when present.

@@ -46,7 +46,10 @@ def test_websocket_spawn_move_delete_and_pool_exhaustion() -> None:
                 def send(command):
                     ws.send_text(json.dumps(command))
                     while True:
-                        response = ws.receive_json()
+                        message = ws.receive()
+                        if "bytes" in message:
+                            continue
+                        response = json.loads(message["text"])
                         if response.get("type") in {"ack", "error"}:
                             return response
 

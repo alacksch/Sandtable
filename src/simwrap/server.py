@@ -110,8 +110,11 @@ def create_app(sim: Sim | None = None, objects: ObjectManager | None = None,
                 prompt, running = state.snapshot()
                 active = manager.list_active()
                 status = "paused" if app.state.paused else "running"
+                object_slots = [{k: (v.tolist() if isinstance(v, np.ndarray) else v)
+                                 for k, v in item.items()} for item in manager.list_objects()]
                 serialized = json.dumps({"type": "state", "active_objects": active,
-                                         "prompt": prompt, "running": running, "status": status})
+                                         "object_slots": object_slots, "prompt": prompt,
+                                         "running": running, "status": status})
                 if serialized != last_state:
                     await websocket.send_text(serialized)
                     last_state = serialized
@@ -149,6 +152,11 @@ async def _handle_command(websocket: WebSocket, command: dict[str, Any], app: Fa
         elif name == "move":
             objects.move(str(command["name"]), np.asarray(command["pos"], dtype=float),
                          np.asarray(command["quat"], dtype=float))
+            result = command["name"]
+        elif name == "update_object":
+            objects.update_visual(str(command["name"]),
+                                  None if command.get("size") is None else np.asarray(command["size"], dtype=float),
+                                  None if command.get("color") is None else np.asarray(command["color"], dtype=float))
             result = command["name"]
         elif name == "delete":
             objects.delete(str(command["name"]))

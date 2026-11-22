@@ -86,6 +86,26 @@ class ObjectManager:
         return {"name": name, "kind": slot["kind"], "pos": pos, "quat": quat,
                 "size": np.asarray(slot["size"]).copy(), "color": np.asarray(slot["rgba"]).copy()}
 
+    def list_objects(self) -> list[dict[str, Any]]:
+        """Return active object descriptors without reading MuJoCo data directly."""
+        return [{"name": name, "kind": str(slot["kind"]), "slot": str(slot["name"]),
+                 "size": np.asarray(slot["size"]).copy(), "color": np.asarray(slot["rgba"]).copy()}
+                for name, slot in self._active.items()]
+
+    def update_visual(self, name: str, size: np.ndarray | None = None,
+                      color: np.ndarray | None = None) -> None:
+        """Update an active object's supported size or color through Sim."""
+        if name not in self._active:
+            raise KeyError(f"No active object named {name!r}")
+        slot = self._active[name]
+        new_size = None if size is None else np.asarray(size, dtype=float)
+        new_color = None if color is None else np.asarray(color, dtype=float)
+        self.sim.update_object_geom(int(slot["geom_id"]), new_size, new_color)
+        if new_size is not None:
+            slot["size"] = new_size.copy()
+        if new_color is not None:
+            slot["rgba"] = new_color.copy()
+
     def pose(self, name: str) -> tuple[np.ndarray, np.ndarray]:
         """Return the current world pose for an active object."""
         if name not in self._active:
