@@ -160,6 +160,11 @@ class Sim:
             qadr = int(self.model.jnt_qposadr[joint_id])
             vadr = int(self.model.jnt_dofadr[joint_id])
             old_pose = self.data.qpos[qadr:qadr + 7].copy()
+            old_contype = int(self.model.geom_contype[geom_id])
+            old_conaffinity = int(self.model.geom_conaffinity[geom_id])
+            if not commit:
+                self.model.geom_contype[geom_id] = 1
+                self.model.geom_conaffinity[geom_id] = 1
             self.data.qpos[qadr:qadr + 3] = position
             self.data.qpos[qadr + 3:qadr + 7] = rotation
             mujoco.mj_forward(self.model, self.data)
@@ -181,10 +186,14 @@ class Sim:
                     break
             if rejected:
                 self.data.qpos[qadr:qadr + 7] = old_pose
+                self.model.geom_contype[geom_id] = old_contype
+                self.model.geom_conaffinity[geom_id] = old_conaffinity
                 mujoco.mj_forward(self.model, self.data)
                 raise ValueError("Placement overlaps another object or the robot")
             if not commit:
                 self.data.qpos[qadr:qadr + 7] = old_pose
+                self.model.geom_contype[geom_id] = old_contype
+                self.model.geom_conaffinity[geom_id] = old_conaffinity
                 mujoco.mj_forward(self.model, self.data)
                 return
             self.data.qvel[vadr:vadr + 6] = 0

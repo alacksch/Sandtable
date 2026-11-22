@@ -56,3 +56,17 @@ def test_objects_settle_without_nans() -> None:
                     assert 0.74 < z < 0.9
     finally:
         sim.close()
+
+
+def test_check_placement_does_not_commit_candidate_pose() -> None:
+    sim = Sim()
+    objects = ObjectManager(sim)
+    try:
+        sim.reset()
+        before_pos, before_quat = sim.get_body_poses()
+        objects.check_placement(np.array((0.0, -0.4, 0.785)), np.array((1.0, 0.0, 0.0, 0.0)), kind="box")
+        after_pos, after_quat = sim.get_body_poses()
+        assert np.allclose(before_pos, after_pos)
+        assert np.allclose(before_quat, after_quat)
+    finally:
+        sim.close()
