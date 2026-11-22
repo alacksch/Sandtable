@@ -56,6 +56,26 @@ class ObjectManager:
         """Return pool slot names currently in use for renderer visibility."""
         return {str(slot["name"]) for slot in self._active.values()}
 
+    def move(self, name: str, pos: np.ndarray, quat: np.ndarray) -> None:
+        """Commit a placed pose, clearing velocity and forwarding the model."""
+        if name not in self._active:
+            raise KeyError(f"No active object named {name!r}")
+        slot = self._active[name]
+        self.sim.move_object_slot(int(slot["joint_id"]), int(slot["geom_id"]), pos, quat)
+
+    def pose(self, name: str) -> tuple[np.ndarray, np.ndarray]:
+        """Return the current world pose for an active object."""
+        if name not in self._active:
+            raise KeyError(f"No active object named {name!r}")
+        slot = self._active[name]
+        return self.sim.get_object_pose(int(slot["body_id"]))
+
+    def half_height(self, name: str) -> float:
+        """Return the object's vertical half extent for upright placement."""
+        size = np.asarray(self._active[name]["size"])
+        kind = self._active[name]["kind"]
+        return float(size[2] if kind == "box" else size[1] if kind == "cylinder" else size[0])
+
     def clear_all(self) -> None:
         """Deactivate all active objects."""
         for name in list(self._active):

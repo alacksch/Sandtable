@@ -135,6 +135,57 @@ class Sim:
         with self.lock:
             return self.data.xpos.copy(), self.data.xquat.copy()
 
+    def get_object_pose(self, body_id: int) -> tuple[np.ndarray, np.ndarray]:
+        """Return one body's world pose while holding the simulation lock."""
+        with self.lock:
+            return self.data.xpos[body_id].copy(), self.data.xquat[body_id].copy()
+
+    def move_object_slot(self, joint_id: int, geom_id: int, pos: np.ndarray,
+                         quat: np.ndarray) -> None:
+        """Commit a freejoint pose, reject interpenetration, and clear velocity.
+
+        Placement is checked with MuJoCo's generated contacts after a temporary
+        forward pass. Contacts with the table/floor are allowed; contacts with
+        another pool object or the robot arm reject the placement.
+        """
+        position = np.asarray(pos, dtype=float)
+        rotation = np.asarray(quat, dtype=float)
+        if position.shape != (3,) or rotation.shape != (4,) or not np.isfinite(position).all() or not np.isfinite(rotation).all():
+            raise ValueError("Object pose must contain finite position (3) and quaternion (4)")
+        norm = np.linalg.norm(rotation)
+        if norm == 0:
+            raise ValueError("Quaternion must be nonzero")
+        rotation /= norm
+        with self.lock:
+            qadr = int(self.model.jnt_qposadr[joint_id])
+            vadr = int(self.model.jnt_dofadr[joint_id])
+            old_pose = self.data.qpos[qadr:qadr + 7].copy()
+            self.data.qpos[qadr:qadr + 3] = position
+            self.data.qpos[qadr + 3:qadr + 7] = rotation
+            mujoco.mj_forward(self.model, self.data)
+            rejected = False
+            for contact in self.data.contact[:self.data.ncon]:
+                pair = (int(contact.geom1), int(contact.geom2))
+                if geom_id not in pair:
+                    continue
+                other = pair[1] if pair[0] == geom_id else pair[0]
+                body_name = self.model.body(int(self.model.geom_bodyid[other])).name or ""
+                geom_name = self.model.geom(other).name or ""
+                if body_name.startswith("pool_") or ("arm" in body_name.lower()) or ("robot" in body_name.lower()):
+                    rejected = True
+                    break
+                # Robot asset names are not consistently prefixed; permit only
+                # the explicit table and floor for supporting contacts.
+                if geom_name not in {"table", "floor"} and body_name not in {"world", "ground"}:
+                    rejected = True
+                    break
+            if rejected:
+                self.data.qpos[qadr:qadr + 7] = old_pose
+                mujoco.mj_forward(self.model, self.data)
+                raise ValueError("Placement overlaps another object or the robot")
+            self.data.qvel[vadr:vadr + 6] = 0
+            mujoco.mj_forward(self.model, self.data)
+
     def get_geom_visual_data(self) -> list[dict[str, object]]:
         """Return renderable geom descriptors and mesh data as owned copies."""
         with self.lock:

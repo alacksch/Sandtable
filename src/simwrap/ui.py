@@ -78,6 +78,23 @@ class SimulationUI:
         self._pause_button.on_click(lambda _: self._toggle_pause())
         self._object_kind = self.server.gui.add_dropdown("Shape", ("box", "cylinder", "sphere"), initial_value="box")
         self.server.gui.add_button("Spawn object").on_click(lambda _: self._spawn_object())
+        self._selected_object = self.server.gui.add_dropdown("Selected object", ("",), initial_value="")
+        self._selected_object.on_update(lambda event: self._select_object(str(event.target.value)))
+        self._snap_to_table = self.server.gui.add_checkbox("Snap to table", initial_value=True)
+        self._place_button = self.server.gui.add_button("Place")
+        self._place_button.on_click(lambda _: self._place_ghost())
+        self._ghost: Any | None = None
+        self._ghost_node_kind: str | None = None
+        self._ghost_kind = "box"
+        self._ghost_size = np.array((0.035, 0.035, 0.035))
+        self._ghost_pos = np.zeros(3)
+        self._ghost_quat = np.array((1., 0., 0., 0.))
+        self._selected_name: str | None = None
+        self._gizmo = self.server.scene.add_transform_controls(
+            "placement-gizmo", position=(0, 0, 0), visible=False,
+            rotation_limits=((0, 0), (0, 0), (-np.pi, np.pi)),
+        )
+        self._gizmo.on_update(self._ghost_updated)
         self._object_buttons: dict[str, Any] = {}
         self.server.gui.add_button("Clear all objects").on_click(lambda _: self._clear_objects())
         for geom in sim.get_geom_visual_data():
@@ -190,10 +207,91 @@ class SimulationUI:
             self._status.content = str(exc)
             return
         self._status.content = f"Spawned {name}"
+        self._refresh_object_list()
+        self._select_object(name)
+
+    def _select_object(self, name: str) -> None:
+        """Show an editable visual ghost for an active object."""
+        if not name or name not in self.objects.list_active():
+            self._selected_name = None
+            if self._selected_object.value != "":
+                self._selected_object.value = ""
+            self._gizmo.visible = False
+            if self._ghost is not None:
+                self._ghost.visible = False
+            return
+        self._selected_name = name
+        if self._selected_object.value != name:
+            self._selected_object.value = name
+        slot = self.objects._active[name]
+        self._ghost_kind = str(slot["kind"])
+        self._ghost_size = np.asarray(slot["size"], dtype=float).copy()
+        self._ghost_pos, self._ghost_quat = self.objects.pose(name)
+        self._set_ghost_node()
+        self._gizmo.position = self._ghost_pos
+        self._gizmo.wxyz = self._ghost_quat
+        self._gizmo.visible = True
+
+    def _set_ghost_node(self) -> None:
+        color = (255, 220, 40)
+        if self._ghost is not None and self._ghost_node_kind != self._ghost_kind:
+            self._ghost.remove()
+            self._ghost = None
+        if self._ghost is None:
+            opts = dict(position=self._ghost_pos, wxyz=self._ghost_quat, color=color, opacity=0.35)
+            if self._ghost_kind == "box":
+                self._ghost = self.server.scene.add_box("placement-ghost", dimensions=2*self._ghost_size, **opts)
+            elif self._ghost_kind == "cylinder":
+                self._ghost = self.server.scene.add_cylinder("placement-ghost", radius=float(self._ghost_size[0]), height=2*float(self._ghost_size[1]), **opts)
+            else:
+                self._ghost = self.server.scene.add_icosphere("placement-ghost", radius=float(self._ghost_size[0]), **opts)
+            self._ghost_node_kind = self._ghost_kind
+        else:
+            self._ghost.visible = True
+            self._ghost.position = self._ghost_pos
+            self._ghost.wxyz = self._ghost_quat
+            if self._ghost_kind == "box":
+                self._ghost.dimensions = 2 * self._ghost_size
+            elif self._ghost_kind == "cylinder":
+                self._ghost.radius = float(self._ghost_size[0])
+                self._ghost.height = 2 * float(self._ghost_size[1])
+            else:
+                self._ghost.radius = float(self._ghost_size[0])
+
+    def _ghost_updated(self, event: Any) -> None:
+        """Update only the ghost while the transform gizmo is dragged."""
+        if self._selected_name is None:
+            return
+        self._ghost_pos = np.asarray(event.target.position, dtype=float).copy()
+        self._ghost_quat = np.asarray(event.target.wxyz, dtype=float).copy()
+        if self._snap_to_table.value:
+            self._ghost_pos[2] = 0.75 + self.objects.half_height(self._selected_name)  # type: ignore[arg-type]
+        self._set_ghost_node()
+        if event.phase == "end":
+            self._place_ghost()
+
+    def _place_ghost(self) -> None:
+        """Commit the ghost pose through ObjectManager's checked move path."""
+        if self._selected_name is None:
+            return
+        try:
+            if self._snap_to_table.value:
+                self._ghost_pos[2] = 0.75 + self.objects.half_height(self._selected_name)
+            self.objects.move(self._selected_name, self._ghost_pos, self._ghost_quat)
+            self._status.content = f"Placed {self._selected_name}"
+        except (KeyError, ValueError) as exc:
+            self._status.content = str(exc)
+            self._select_object(self._selected_name)
 
     def _refresh_object_list(self) -> None:
         """Keep one delete button per active object."""
         active = set(self.objects.list_active())
+        choices = tuple(self.objects.list_active()) or ("",)
+        self._selected_object.options = choices
+        if self._selected_name not in active:
+            self._selected_name = None
+            if self._selected_object.value != "":
+                self._selected_object.value = ""
         for name in tuple(self._object_buttons):
             if name not in active:
                 self._object_buttons.pop(name).remove()
@@ -206,6 +304,8 @@ class SimulationUI:
     def _delete_object(self, name: str) -> None:
         """Delete one active object."""
         self.objects.delete(name)
+        if name == self._selected_name:
+            self._select_object("")
         self._refresh_object_list()
 
     def _clear_objects(self) -> None:
