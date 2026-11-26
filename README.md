@@ -34,16 +34,31 @@ npm run dev
 
 The Vite server prints its local URL when it starts. Create a production frontend bundle with `npm run build` from `web/`; the backend serves `web/dist` when that directory exists.
 
-## Optional policy runtime
+## Attach a model
 
-The base simulator does not require ML packages. An optional SmolVLA environment can be installed with `uv`:
+The simulator keeps model inference behind a policy adapter and worker. The model receives observations from `Sim.get_observation()` and returns six joint position targets through `Sim.apply_action()`. Keep model loading and inference out of the physics thread; the existing policy worker runs inference separately and the simulator validates target shape, finiteness, range, and observation age.
+
+### Elbarbary SmolVLA checkpoint
+
+The current optional adapter targets `Elbarbary/so101_smolvla`. It loads the checkpoint and processor files lazily into `.model-cache` when Run is pressed. Install its optional dependencies and launch the app with that environment:
 
 ```powershell
 uv venv .venv-policy --python python
 uv pip install --python .venv-policy\Scripts\python.exe -e ".[smolvla]"
+.venv-policy\Scripts\python.exe main.py --ui web --port 8080
 ```
 
-The optional runtime downloads model files into `.model-cache` on first use. Check `POLICY_CONTRACT.md` for the observation/action contract and integration constraints. Policy execution is simulation-only.
+Open the web UI, enter a task prompt, and press **Run**. Press **Stop** to stop inference and hold the arm's current pose. The first Run downloads the required checkpoint and processor artifacts into `.model-cache`; later runs reuse the cache. To change the Hugging Face model ID or adapt a different checkpoint, update `MODEL_ID` and the loading/preprocessing logic in `src/simwrap/policy_runner.py` to match that model's actual config and processor. The adapter currently expects six specific joints, `top` and `wrist` images, and checkpoint actions in degrees; it converts those to the simulator's ordered radians.
+
+### Integrate another model
+
+1. Install the model's runtime dependencies in an isolated environment. Keep large weights and private credentials out of source control; use `.model-cache` or a configured cache directory for downloaded artifacts.
+2. Implement the `Policy` interface in `src/simwrap/policy.py`. Its `act(observation)` method should preprocess the prompt, images, and joint state as required by the model, run inference, and return a NumPy vector of six target positions.
+3. Add a loader/adapter in `src/simwrap/policy_runner.py` (or a separate module). Make joint order, units, image names/shape/color order, normalization, action chunking, and checkpoint version explicit. Convert outputs to actuator order and radians before returning them.
+4. Connect the adapter to the existing policy worker lifecycle: lazy load, Run/Stop, pause/reset handling, and safe hold on errors or shutdown. Do not call MuJoCo directly from the model; use the `Sim` API.
+5. Add tests for observation preprocessing, output conversion, invalid/non-finite/out-of-range actions, and stop/error behavior. Then run the browser with the target model in simulation and inspect the arm response before using it for tasks.
+
+`Sim.get_observation()` supplies owned RGB frames (`front`, `top`, `wrist`), six joint positions in radians, joint names/units, simulation time, and the prompt. `Sim.apply_action()` accepts only six finite, in-range position targets in actuator order and can reject stale observations. A model that expects a different number of joints, cameras, units, or action type needs a deliberate mapping/adapter; do not assume matching names mean matching calibration. See [POLICY_CONTRACT.md](POLICY_CONTRACT.md) for the current contract and checkpoint-specific details. Policy execution is for simulation experiments and does not establish real-robot safety.
 
 ## Project structure
 
