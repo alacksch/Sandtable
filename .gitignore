@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+build/
+dist/
+
+# Virtual environments and local model/runtime caches
+.venv/
+.venv-*/
+venv/
+.model-cache/
+.uv-cache/
+
+# Local environment files (keep example templates)
+.env
+.env.*
+!.env.example
+web/.env
+web/.env.*
+!web/.env.example
+
+# Frontend dependencies and generated output
+web/node_modules/
+web/dist/
+web/*.tsbuildinfo
+
+# Editor and operating system files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+Desktop.ini

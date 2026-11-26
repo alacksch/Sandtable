@@ -1,44 +1,153 @@
 import { Canvas, useFrame, useThree } from '@react-three/fiber';
 import { Edges, OrbitControls, TransformControls, Grid } from '@react-three/drei';
-import { Suspense, useEffect, useMemo, useRef, useState } from 'react';
+import { Component, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import * as THREE from 'three';
 import { STLLoader } from 'three/addons/loaders/STLLoader.js';
 
 type Geom = { id: number; name: string; body: number; body_name: string; type: number; size: number[]; pos: number[]; quat: number[]; rgba: number[]; is_pool: boolean; mesh_id?: number };
 type SceneData = { geoms: Geom[]; body_order: number[]; pool: Record<string, {capacity:number; names:string[]; active:string[]}> };
 type ObjectDescriptor = {name:string;kind:string;slot:string;size:number[];color:number[]};
-type LiveState = { active_objects:string[]; object_slots:ObjectDescriptor[]; prompt:string; running:boolean; status:string };
+type LiveState = { active_objects:string[]; object_slots:ObjectDescriptor[]; prompt:string; running:boolean; status:string; policy_status?:string };
+type ArmTelemetry = {joint_state:number[];joint_targets:number[]};
+type ArmActuator = {index:number;actuator_name:string;joint_name:string;unit:string;limited:boolean;control_range:number[]};
 
-function useSocket(onState: (s: LiveState) => void) {
+class CanvasErrorBoundary extends Component<{children:React.ReactNode},{error:Error|null}> {
+  state: {error:Error|null} = {error:null};
+  static getDerivedStateFromError(error:Error) { return {error}; }
+  componentDidCatch(error:Error) { console.error('3D scene failed',error); }
+  render() {
+    if (this.state.error) return <div className="scene-error panel" role="alert"><b>3D scene stopped</b><span>{this.state.error.message}</span><button onClick={()=>window.location.reload()}>Reload scene</button></div>;
+    return this.props.children;
+  }
+}
+
+let requestSequence = 0;
+
+function createRequestId(): string {
+  requestSequence += 1;
+  return globalThis.crypto?.randomUUID?.() ?? `sandtable-${Date.now()}-${requestSequence}`;
+}
+
+const meshGeometryCache = new Map<number, Promise<THREE.BufferGeometry>>();
+
+function loadMeshGeometry(meshId:number):Promise<THREE.BufferGeometry> {
+  let pending=meshGeometryCache.get(meshId);
+  if(!pending){
+    pending=fetch(`/api/mesh/${meshId}`).then(response=>{if(!response.ok)throw new Error(`Mesh ${meshId} request failed (${response.status})`);return response.arrayBuffer();}).then(bytes=>new STLLoader().parse(bytes));
+    meshGeometryCache.set(meshId,pending);
+  }
+  return pending;
+}
+
+type PendingRequest = {resolve:(value:unknown)=>void;reject:(reason:Error)=>void;timer:number};
+
+function useSocket(onState: (s: LiveState) => void, onConnection: (status:string)=>void,
+                   onNotice: (notice:{code:string;names:string[]})=>void,
+                   expectedBodyCount: React.MutableRefObject<number|null>,
+                   onArmTelemetry: (value:ArmTelemetry)=>void) {
   const socket = useRef<WebSocket | null>(null);
   const frame = useRef<Float32Array | null>(null);
   const onStateRef = useRef(onState);
-  const pending = useRef(new Map<string,{resolve:(value:unknown)=>void;reject:(reason:Error)=>void}>());
+  const onConnectionRef = useRef(onConnection);
+  const onNoticeRef = useRef(onNotice);
+  const onArmTelemetryRef = useRef(onArmTelemetry);
+  const expectedBodyCountRef = useRef(expectedBodyCount);
+  const pending = useRef(new Map<string,PendingRequest>());
   onStateRef.current = onState;
+  onConnectionRef.current = onConnection;
+  onNoticeRef.current = onNotice;
+  onArmTelemetryRef.current = onArmTelemetry;
+  expectedBodyCountRef.current = expectedBodyCount;
   useEffect(() => {
-    const ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`);
-    ws.binaryType = 'arraybuffer'; socket.current = ws;
-    ws.onmessage = (event) => {
-      if (typeof event.data === 'string') { const msg = JSON.parse(event.data) as LiveState & {type:string;id?:string;code?:string;message?:string};
-        if(msg.type==='ack'&&msg.id){pending.current.get(msg.id)?.resolve(msg);pending.current.delete(msg.id);}
-        else if(msg.type==='error'&&msg.id){pending.current.get(msg.id)?.reject(new Error(`${msg.code}: ${msg.message}`));pending.current.delete(msg.id);}
-        else if (msg.type === 'state') onStateRef.current(msg);
+    let disposed = false;
+    let retryDelay = 500;
+    let retryTimer = 0;
+    let activeSocket: WebSocket | null = null;
+    const rejectPending = (reason: Error) => {
+      for (const [id, request] of pending.current) {
+        window.clearTimeout(request.timer);
+        request.reject(reason);
+        pending.current.delete(id);
       }
-      else frame.current = new Float32Array(event.data as ArrayBuffer);
     };
-    return () => { ws.close(); socket.current = null; };
+    const connect = () => {
+      if (disposed) return;
+      const ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`);
+      activeSocket = ws;
+      socket.current = ws;
+      ws.binaryType = 'arraybuffer';
+      ws.onopen = () => { retryDelay = 500; onConnectionRef.current('connected'); };
+      ws.onmessage = (event) => {
+        try {
+          if (typeof event.data === 'string') {
+            const msg = JSON.parse(event.data) as LiveState & {type:string;id?:string;code?:string;message?:string;names?:unknown[];joint_state?:unknown;joint_targets?:unknown};
+            if (msg.type === 'ack' && msg.id) {
+              const request = pending.current.get(msg.id);
+              if (request) { window.clearTimeout(request.timer); request.resolve(msg); pending.current.delete(msg.id); }
+            } else if (msg.type === 'error' && msg.id) {
+              const request = pending.current.get(msg.id);
+              if (request) { window.clearTimeout(request.timer); request.reject(new Error(`${msg.code}: ${msg.message}`)); pending.current.delete(msg.id); }
+            } else if (msg.type === 'state') onStateRef.current(msg);
+            else if (msg.type === 'arm' && Array.isArray(msg.joint_state) && Array.isArray(msg.joint_targets)
+                     && msg.joint_state.every(Number.isFinite) && msg.joint_targets.every(Number.isFinite)) {
+              onArmTelemetryRef.current({joint_state:msg.joint_state as number[],joint_targets:msg.joint_targets as number[]});
+            }
+            else if (msg.type === 'notice' && msg.code === 'objects_recovered' && Array.isArray(msg.names)) {
+              onNoticeRef.current({code:msg.code,names:msg.names.filter((name):name is string=>typeof name==='string')});
+            }
+            return;
+          }
+          if (!(event.data instanceof ArrayBuffer) || event.data.byteLength % 4 !== 0) {
+            throw new Error('Invalid pose frame encoding');
+          }
+          const nextFrame = new Float32Array(event.data);
+          const bodyCount = expectedBodyCountRef.current.current;
+          if ((bodyCount !== null && nextFrame.length !== bodyCount * 7) || !nextFrame.every(Number.isFinite)) {
+            throw new Error('Invalid pose frame dimensions or values');
+          }
+          frame.current = nextFrame;
+        } catch (error) {
+          onConnectionRef.current(error instanceof Error ? `protocol error: ${error.message}` : 'protocol error');
+          ws.close();
+        }
+      };
+      ws.onclose = () => {
+        if (activeSocket !== ws) return;
+        socket.current = null;
+        rejectPending(new Error('WebSocket disconnected'));
+        if (!disposed) {
+          onConnectionRef.current('reconnecting');
+          retryTimer = window.setTimeout(connect, retryDelay);
+          retryDelay = Math.min(retryDelay * 2, 5000);
+        }
+      };
+      ws.onerror = () => ws.close();
+    };
+    connect();
+    return () => {
+      disposed = true;
+      window.clearTimeout(retryTimer);
+      activeSocket?.close();
+      if (socket.current === activeSocket) socket.current = null;
+      rejectPending(new Error('WebSocket closed'));
+    };
   }, []);
-  const request=(command:string, extra:Record<string,unknown>={})=>new Promise<unknown>((resolve,reject)=>{
+  const request=useCallback((command:string, extra:Record<string,unknown>={})=>new Promise<unknown>((resolve,reject)=>{
     if(socket.current?.readyState!==WebSocket.OPEN){reject(new Error('WebSocket is not connected'));return;}
-    const id=crypto.randomUUID(); pending.current.set(id,{resolve,reject}); socket.current.send(JSON.stringify({id,command,...extra}));
-  });
+    const id=createRequestId();
+    const timer=window.setTimeout(()=>{pending.current.delete(id);reject(new Error(`Timed out waiting for ${command}`));},5000);
+    pending.current.set(id,{resolve,reject,timer});
+    try { socket.current.send(JSON.stringify({id,command,...extra})); }
+    catch(error) { window.clearTimeout(timer);pending.current.delete(id);reject(error instanceof Error?error:new Error(String(error))); }
+  }),[]);
   return { frame, request };
 }
 
 function PlacementPreview({kind,request,onSpawn,onToast}:{kind:string|null;request:(c:string,e?:Record<string,unknown>)=>Promise<unknown>;onSpawn:(name:string)=>void;onToast:(message:string)=>void}) {
   const {camera,gl}=useThree(); const group=useRef<THREE.Group>(null); const mouse=useRef(new THREE.Vector2()); const position=useRef(new THREE.Vector3());
-  const inside=useRef(false); const lastCheck=useRef(0); const lastKey=useRef(''); const candidateKey=useRef(''); const down=useRef<[number,number]|null>(null); const dragged=useRef(false); const lastPlaced=useRef(0); const colorRef=useRef<THREE.MeshStandardMaterial>(null); const [accepted,setAccepted]=useState(false);
-  const raycaster=useMemo(()=>new THREE.Raycaster(),[]); const plane=useMemo(()=>new THREE.Plane(new THREE.Vector3(0,0,1),-.75),[]);
+  const inside=useRef(false); const lastCheck=useRef(0); const lastKey=useRef(''); const candidateKey=useRef(''); const down=useRef<[number,number]|null>(null); const dragged=useRef(false); const lastPlaced=useRef(0); const colorRef=useRef<THREE.MeshStandardMaterial>(null); const accepted=useRef(false);
+  const raycaster=useMemo(()=>new THREE.Raycaster(),[]); const plane=useMemo(()=>new THREE.Plane(new THREE.Vector3(0,0,1),-.75),[]); const hitPoint=useMemo(()=>new THREE.Vector3(),[]);
+  useEffect(()=>{accepted.current=false;lastKey.current='';candidateKey.current='';lastCheck.current=0;},[kind]);
   useEffect(()=>{const canvas=gl.domElement; const move=(event:PointerEvent)=>{const rect=canvas.getBoundingClientRect();mouse.current.set(((event.clientX-rect.left)/rect.width)*2-1,-((event.clientY-rect.top)/rect.height)*2+1);inside.current=event.clientX>=rect.left&&event.clientX<=rect.right&&event.clientY>=rect.top&&event.clientY<=rect.bottom;
       if(down.current&&Math.hypot(event.clientX-down.current[0],event.clientY-down.current[1])>6)dragged.current=true;};
     const downEvent=(event:PointerEvent)=>{down.current=[event.clientX,event.clientY];dragged.current=false;};
@@ -48,12 +157,12 @@ function PlacementPreview({kind,request,onSpawn,onToast}:{kind:string|null;reque
     return()=>{window.removeEventListener('pointerdown',downEvent);window.removeEventListener('pointermove',move);window.removeEventListener('pointerup',up);canvas.removeEventListener('drop',drop);canvas.removeEventListener('dragover',over);};
   },[gl,kind,onSpawn,onToast,request]);
   useFrame(()=>{if(!kind||!group.current){if(group.current)group.current.visible=false;return;}group.current.visible=inside.current;
-    raycaster.setFromCamera(mouse.current,camera);const hit=raycaster.ray.intersectPlane(plane,new THREE.Vector3());if(!hit)return;
+    raycaster.setFromCamera(mouse.current,camera);const hit=raycaster.ray.intersectPlane(plane,hitPoint);if(!hit)return;
     const half=kind==='box'?.035:kind==='cylinder'?.04:.035;position.current.set(hit.x,hit.y,.75+half);group.current.position.copy(position.current);
-    const inTable=Math.abs(hit.x)<=.6&&Math.abs(hit.y)<=.45; if(!inTable){setAccepted(false);return;}
+    const inTable=Math.abs(hit.x)<=.6&&Math.abs(hit.y)<=.45; if(!inTable){accepted.current=false;lastKey.current='';candidateKey.current='';if(colorRef.current)colorRef.current.color.set('#ff4f58');return;}
     const key=`${kind}:${hit.x.toFixed(2)}:${hit.y.toFixed(2)}`;candidateKey.current=key;const now=performance.now();
-    if(key!==lastKey.current&&now-lastCheck.current>120){lastKey.current=key;lastCheck.current=now;request('check_placement',{kind,pos:position.current.toArray(),quat:[1,0,0,0]}).then(()=>{if(candidateKey.current===key)setAccepted(true);}).catch(()=>{if(candidateKey.current===key)setAccepted(false);});}
-    if(colorRef.current)colorRef.current.color.set(accepted&&inTable?'#4ee19b':'#ff4f58');
+    if(key!==lastKey.current&&now-lastCheck.current>120){lastKey.current=key;lastCheck.current=now;request('check_placement',{kind,pos:position.current.toArray(),quat:[1,0,0,0]}).then(()=>{if(candidateKey.current===key)accepted.current=true;}).catch(()=>{if(candidateKey.current===key)accepted.current=false;});}
+    if(colorRef.current)colorRef.current.color.set(accepted.current?'#4ee19b':'#ff4f58');
   });
   const previewMaterial=<meshStandardMaterial ref={colorRef} color="#ff4f58" transparent opacity={.42}/>;
   return <group ref={group} visible={false}>{kind==='box'?<mesh><boxGeometry args={[.07,.07,.07]}/>{previewMaterial}</mesh>:kind==='cylinder'?<mesh rotation={[Math.PI/2,0,0]}><cylinderGeometry args={[.03,.03,.08,20]}/>{previewMaterial}</mesh>:<mesh><sphereGeometry args={[.035,20,14]}/>{previewMaterial}</mesh>}</group>;
@@ -74,7 +183,7 @@ function GeomMesh({ geom, active, selected, objectName, object, onSelect }: {geo
     if (geom.type===3) return new THREE.CapsuleGeometry(size[0],size[1]*2,6,12);
     return new THREE.BoxGeometry(Math.max(size[0]*2,.02),Math.max(size[1]*2,.02),Math.max(size[2]*2,.02));
   },[geom,size]);
-  useEffect(()=>{ if(geom.type!==7||geom.mesh_id===undefined)return; let alive=true; fetch(`/api/mesh/${geom.mesh_id}`).then(r=>r.arrayBuffer()).then(bytes=>{if(alive)setMeshGeometry(new STLLoader().parse(bytes));}); return()=>{alive=false;}; },[geom]);
+  useEffect(()=>{ if(geom.type!==7||geom.mesh_id===undefined)return; let alive=true; loadMeshGeometry(geom.mesh_id).then(value=>{if(alive)setMeshGeometry(value);}).catch(error=>console.error('Mesh load failed',error)); return()=>{alive=false;}; },[geom]);
   const pointerDown=useRef<[number,number]|null>(null);
   return <mesh ref={ref} geometry={geom.type===7?(meshGeometry??geometry):geometry} material={material} visible={!geom.is_pool || active} castShadow receiveShadow
     onPointerDown={objectName?e=>{pointerDown.current=[e.nativeEvent.clientX,e.nativeEvent.clientY];}:undefined}
@@ -178,26 +287,72 @@ function Inspector({item,scene,frames,request,onToast,onDelete,snap,setSnap,mode
   </aside>;
 }
 
+function ArmControlPanel({request,telemetryRef,onToast}:{request:(c:string,e?:Record<string,unknown>)=>Promise<unknown>;telemetryRef:React.MutableRefObject<ArmTelemetry|null>;onToast:(message:string)=>void}) {
+  const [actuators,setActuators]=useState<ArmActuator[]>([]);
+  const [targets,setTargets]=useState<number[]>([]);
+  const [actual,setActual]=useState<number[]>([]);
+  const targetRef=useRef<number[]>([]); const dragging=useRef(false); const sendTimer=useRef<number|null>(null);
+  const adoptTargets=(values:number[])=>{targetRef.current=values;setTargets(values);};
+  useEffect(()=>{let alive=true;fetch('/api/arm').then(response=>{if(!response.ok)throw new Error(`Arm controls request failed (${response.status})`);return response.json() as Promise<{actuators:ArmActuator[];joint_state:number[];joint_targets:number[]}>;}).then(data=>{if(!alive)return;setActuators(data.actuators);setActual(data.joint_state);adoptTargets(data.joint_targets);}).catch(error=>{if(alive)onToast(error instanceof Error?error.message:String(error));});return()=>{alive=false;if(sendTimer.current!==null)window.clearTimeout(sendTimer.current);};},[onToast]);
+  useEffect(()=>{const timer=window.setInterval(()=>{const sample=telemetryRef.current;if(!sample)return;setActual(sample.joint_state);if(!dragging.current&&sendTimer.current===null)adoptTargets(sample.joint_targets);},100);return()=>window.clearInterval(timer);},[telemetryRef]);
+  const send=(values:number[])=>{void request('set_arm',{targets:values}).catch(error=>{onToast(error instanceof Error?error.message:String(error));const sample=telemetryRef.current;if(sample)adoptTargets(sample.joint_targets);dragging.current=false;});};
+  const change=(index:number,value:number)=>{const next=targetRef.current.slice();next[index]=value;targetRef.current=next;setTargets(next);dragging.current=true;if(sendTimer.current!==null)window.clearTimeout(sendTimer.current);sendTimer.current=window.setTimeout(()=>{sendTimer.current=null;send(next);},70);};
+  const commit=()=>{if(sendTimer.current!==null){window.clearTimeout(sendTimer.current);sendTimer.current=null;}dragging.current=false;send(targetRef.current);};
+  const hold=()=>request('hold_arm').catch(error=>onToast(error instanceof Error?error.message:String(error)));
+  return <aside className="arm-controls panel"><div className="arm-controls-head"><div><small>SIMULATED ARM</small><b>Joint controls</b></div><button onClick={()=>void hold()}>Hold current</button></div>
+    {actuators.length===0?<p>Loading arm controls…</p>:actuators.map((actuator,index)=>{const limits=actuator.control_range;const value=targets[index]??actual[index]??0;return <label className="arm-joint" key={actuator.actuator_name}><span>{actuator.joint_name.replaceAll('_',' ')}</span><b>{(value*180/Math.PI).toFixed(0)}°</b><input aria-label={actuator.joint_name.replaceAll('_',' ')} type="range" min={limits[0]} max={limits[1]} step="0.01" value={value} onChange={event=>change(index,Number(event.target.value))} onPointerUp={commit} onKeyUp={commit} onBlur={()=>{if(dragging.current)commit();}}/><small>Actual {(actual[index]??0)*180/Math.PI|0}° · limit {limits[0]*180/Math.PI|0}° to {limits[1]*180/Math.PI|0}°</small></label>;})}
+    <p className="arm-control-note">Position targets · values shown in degrees</p>
+  </aside>;
+}
+
 export function App() {
-  const [scene,setScene]=useState<SceneData|null>(null); const [live,setLive]=useState<LiveState>({active_objects:[],object_slots:[],prompt:'',running:false,status:'connecting'});
-  const [prompt,setPrompt]=useState(''); const [paused,setPaused]=useState(false); const [cameraOpen,setCameraOpen]=useState(true); const [placing,setPlacing]=useState<string|null>(null); const [toast,setToast]=useState('');const [selectedName,setSelectedName]=useState<string|null>(null);const [inViewObjects,setInViewObjects]=useState<ObjectDescriptor[]>([]);const [snap,setSnap]=useState(true);const [gizmoMode,setGizmoMode]=useState<'translate'|'rotate'>('translate');
-  const stableState=(s:LiveState)=>{setLive(s);setPrompt(s.prompt);}; const {frame,request}=useSocket(stableState);
-  useEffect(()=>{fetch('/api/scene').then(r=>r.json()).then(setScene).catch(()=>setLive(s=>({...s,status:'API unavailable'})));},[]);
-  const command=(command:string, extra:Record<string,unknown>={})=>request(command,extra).catch(e=>setToast(e.message));
-  const notify=(message:string)=>{setToast(message);window.setTimeout(()=>setToast(''),2800);};
+  const [scene,setScene]=useState<SceneData|null>(null); const [live,setLive]=useState<LiveState>({active_objects:[],object_slots:[],prompt:'',running:false,status:'connecting',policy_status:'offline'});
+  const [prompt,setPrompt]=useState(''); const [paused,setPaused]=useState(false); const [cameraOpen,setCameraOpen]=useState(true); const [placing,setPlacing]=useState<string|null>(null); const [toast,setToast]=useState('');const [selectedName,setSelectedName]=useState<string|null>(null);const [inViewObjects,setInViewObjects]=useState<ObjectDescriptor[]>([]);const [snap,setSnap]=useState(true);const [gizmoMode,setGizmoMode]=useState<'translate'|'rotate'>('translate');const [runtimeError,setRuntimeError]=useState('');const [connectionStatus,setConnectionStatus]=useState('connecting');
+  const toastTimer=useRef<number|null>(null);
+  const notify=useCallback((message:string)=>{setToast(message);if(toastTimer.current!==null)window.clearTimeout(toastTimer.current);toastTimer.current=window.setTimeout(()=>{setToast('');toastTimer.current=null;},2800);},[]);
+  const expectedBodyCount=useRef<number|null>(null);
+  const armTelemetry=useRef<ArmTelemetry|null>(null);
+  const [armOpen,setArmOpen]=useState(false);
+  const sessionInput=useRef<HTMLInputElement|null>(null);
+  const stableState=useCallback((s:LiveState)=>{setLive(s);setPrompt(s.prompt);setPaused(s.status==='paused');},[]);
+  const stableConnection=useCallback((status:string)=>setConnectionStatus(status),[]);
+  const stableNotice=useCallback((notice:{code:string;names:string[]})=>{
+    if(notice.code==='objects_recovered')notify(`Returned ${notice.names.join(', ')} to the tray after falling off the table`);
+  },[notify]);
+  const stableArmTelemetry=useCallback((value:ArmTelemetry)=>{armTelemetry.current=value;},[]);
+  const {frame,request}=useSocket(stableState,stableConnection,stableNotice,expectedBodyCount,stableArmTelemetry);
+  useEffect(()=>{let active=true;fetch('/api/scene').then(response=>{if(!response.ok)throw new Error(`Scene request failed (${response.status})`);return response.json() as Promise<SceneData>;}).then(data=>{if(!active)return;expectedBodyCount.current=data.body_order.length;setScene(data);}).catch(error=>{if(active)setLive(s=>({...s,status:'API unavailable'}));setRuntimeError(error instanceof Error?error.message:'Unable to load scene');});return()=>{active=false;};},[]);
+  useEffect(()=>{
+    const onError=(event:ErrorEvent)=>setRuntimeError(event.message||'Unexpected UI error');
+    const onRejection=(event:PromiseRejectionEvent)=>setRuntimeError(String(event.reason??'Unexpected asynchronous UI error'));
+    window.addEventListener('error',onError);
+    window.addEventListener('unhandledrejection',onRejection);
+    return()=>{window.removeEventListener('error',onError);window.removeEventListener('unhandledrejection',onRejection);};
+  },[]);
+  const command=useCallback((name:string, extra:Record<string,unknown>={})=>request(name,extra).catch(error=>notify(error instanceof Error?error.message:String(error))),[request,notify]);
+  const onSpawn=useCallback((name:string)=>{setPlacing(null);setSelectedName(name);notify(`Placed ${name}`);},[notify]);
+  useEffect(()=>()=>{if(toastTimer.current!==null)window.clearTimeout(toastTimer.current);},[]);
+  useEffect(()=>{if(selectedName&&!live.object_slots.some(item=>item.name===selectedName))setSelectedName(null);},[live.object_slots,selectedName]);
+  useEffect(()=>{const timer=window.setTimeout(()=>{if(prompt!==live.prompt)request('set_prompt',{text:prompt}).catch(error=>notify(error instanceof Error?error.message:String(error)));},150);return()=>window.clearTimeout(timer);},[prompt,live.prompt,request,notify]);
   useEffect(()=>{const key=(event:KeyboardEvent)=>{if(event.key==='Escape'){setSelectedName(null);setPlacing(null);return;}if((event.key==='Delete'||event.key==='Backspace')&&selectedName){const target=event.target;if(target instanceof HTMLInputElement||target instanceof HTMLTextAreaElement)return;event.preventDefault();request('delete',{name:selectedName}).then(()=>setSelectedName(null)).catch(e=>notify(e.message));}};window.addEventListener('keydown',key);return()=>window.removeEventListener('keydown',key);},[selectedName,request]);
   const selected=live.object_slots?.find(item=>item.name===selectedName)??null;
-  const deleteSelected=()=>{if(selectedName)request('delete',{name:selectedName}).then(()=>setSelectedName(null)).catch(e=>notify(e.message));};
-  return <main className="app"><Canvas shadows camera={{position:[1.5,-1.8,1.5],fov:45}} onPointerMissed={()=>{if(!placing)setSelectedName(null);}} onCreated={({camera})=>{camera.up.set(0,0,1);camera.lookAt(0,0,.7);}}>
+  const deleteSelected=()=>{if(selectedName)request('delete',{name:selectedName}).then(()=>setSelectedName(null)).catch(e=>notify(e instanceof Error?e.message:String(e)));};
+  const togglePause=()=>{const next=paused?'resume':'pause';request(next).then(()=>setPaused(next==='pause')).catch(error=>notify(error instanceof Error?error.message:String(error)));};
+  const runPolicy=()=>request('set_prompt',{text:prompt}).then(()=>request('run')).catch(error=>notify(error instanceof Error?error.message:String(error)));
+  const saveSession=async()=>{try{const response=await fetch('/api/session');if(!response.ok)throw new Error(`Session save failed (${response.status})`);const data=await response.blob();const url=URL.createObjectURL(data);const link=document.createElement('a');link.href=url;link.download='sandtable-session.json';link.click();window.setTimeout(()=>URL.revokeObjectURL(url),1000);notify('Session saved');}catch(error){notify(error instanceof Error?error.message:String(error));}};
+  const loadSession=async(file:File)=>{try{if(file.size>1024*1024)throw new Error('Session file exceeds 1 MB');const session=JSON.parse(await file.text()) as unknown;const response=await fetch('/api/session',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(session)});const result=await response.json() as {detail?:string};if(!response.ok)throw new Error(result.detail??`Session load failed (${response.status})`);setSelectedName(null);setPlacing(null);notify('Session loaded');}catch(error){notify(error instanceof Error?error.message:String(error));}finally{if(sessionInput.current)sessionInput.current.value='';}};
+  return <main className="app"><CanvasErrorBoundary><Canvas shadows dpr={[1,1.5]} fallback={<div className="scene-error panel">WebGL is unavailable in this browser.</div>} camera={{position:[1.5,-1.8,1.5],fov:45}} onPointerMissed={()=>{if(!placing)setSelectedName(null);}} onCreated={({camera})=>{camera.up.set(0,0,1);camera.lookAt(0,0,.7);}}>
     <color attach="background" args={['#080c12']} /><ambientLight intensity={1.3}/><directionalLight position={[1,-2,3]} intensity={2.5} castShadow />
-    {scene&&<Suspense fallback={null}><Scene data={scene} frames={frame} objectSlots={live.object_slots??[]} selectedName={selectedName} onSelect={setSelectedName}/><InViewObjectsMonitor objects={live.object_slots??[]} scene={scene} frames={frame} onChange={setInViewObjects}/><PlacementPreview kind={placing} request={request} onSpawn={name=>{setPlacing(null);setSelectedName(name);notify(`Placed ${name}`);}} onToast={notify}/>{selected&&<GhostGizmo item={selected} scene={scene} frames={frame} snap={snap} mode={gizmoMode} request={request} onToast={notify}/>}</Suspense>}
+    {scene&&<Suspense fallback={null}><Scene data={scene} frames={frame} objectSlots={live.object_slots??[]} selectedName={selectedName} onSelect={setSelectedName}/><InViewObjectsMonitor objects={live.object_slots??[]} scene={scene} frames={frame} onChange={setInViewObjects}/><PlacementPreview kind={placing} request={request} onSpawn={onSpawn} onToast={notify}/>{selected&&<GhostGizmo item={selected} scene={scene} frames={frame} snap={snap} mode={gizmoMode} request={request} onToast={notify}/>}</Suspense>}
     <OrbitControls makeDefault target={[0,0,.7]} />
-  </Canvas>
-  <header className="prompt panel"><span className={`status ${live.running?'on':''}`}/><input value={prompt} onChange={e=>{setPrompt(e.target.value);command('set_prompt',{text:e.target.value});}} placeholder="Describe what the robot should do…"/><button className="primary" onClick={()=>command('run')}>Run</button><button onClick={()=>command('stop')}>Stop</button></header>
-  <aside className="toolbar panel"><button onClick={()=>command('reset')}>↺ Reset</button><button onClick={()=>{command(paused?'resume':'pause');setPaused(!paused);}}>{paused?'▶ Resume':'Ⅱ Pause'}</button></aside>
+  </Canvas></CanvasErrorBoundary>
+  <header className="prompt panel"><span className={`status ${live.running?'pending':''}`} title={live.policy_status??'Policy offline'}/><span className="policy-label">{(live.policy_status??'offline').toUpperCase()}</span><input value={prompt} onChange={e=>setPrompt(e.target.value)} placeholder="Describe what the robot should do…"/><button className="primary" onClick={runPolicy}>Run</button><button onClick={()=>command('stop')}>Stop</button></header>
+  <aside className="toolbar panel"><button onClick={()=>command('reset')}>↺ Reset</button><button onClick={togglePause}>{paused?'▶ Resume':'Ⅱ Pause'}</button><button onClick={()=>setArmOpen(open=>!open)}>{armOpen?'Close arm':'Arm controls'}</button></aside>
+  <aside className="session-toolbar panel"><button onClick={saveSession}>Save</button><button onClick={()=>sessionInput.current?.click()}>Load</button><input ref={sessionInput} type="file" accept="application/json,.json" hidden onChange={event=>{const file=event.target.files?.[0];if(file)void loadSession(file);}}/></aside>
   <InViewObjectsList objects={inViewObjects} selectedName={selectedName} onSelect={setSelectedName}/>
+  {armOpen&&<ArmControlPanel request={request} telemetryRef={armTelemetry} onToast={notify}/>}
   <section className="tray panel"><div className="tray-title"><b>OBJECTS</b><span>{placing?`Click the table to place ${placing}`:'Drag an object onto the table'}</span></div><div className="cards">{(['box','cylinder','sphere'] as const).map(kind=>{const pool=scene?.pool[kind];const count=live.active_objects.filter(n=>n.startsWith(`${kind}_`)).length;return <div className={`card ${pool&&count>=pool.capacity?'disabled':''}`} key={kind} draggable={!!pool&&count<pool.capacity} onDragStart={()=>setPlacing(kind)} onDragEnd={()=>window.setTimeout(()=>setPlacing(null),0)} onClick={()=>pool&&count<pool.capacity&&setPlacing(kind)}><i className={`shape ${kind}`}/><div><b>{kind}</b><small>{count}/{pool?.capacity??10} in scene</small></div></div>;})}</div></section>
-  <section className={`camera panel ${selected?'inspector-open':''}`}><button className="camera-toggle" onClick={()=>setCameraOpen(!cameraOpen)}>CAMERAS <span>{cameraOpen?'⌄':'⌃'}</span></button>{cameraOpen&&<div className="feeds"><img src="/api/camera/front.mjpg"/><img src="/api/camera/top.mjpg"/></div>}</section>
+  <section className={`camera panel ${selected?'inspector-open':''}`}><button className="camera-toggle" onClick={()=>setCameraOpen(!cameraOpen)}>CAMERAS <span>{cameraOpen?'⌄':'⌃'}</span></button>{cameraOpen&&<div className="feeds"><img aria-label="Front camera" src="/api/camera/front.mjpg"/><img aria-label="Top camera" src="/api/camera/top.mjpg"/><img aria-label="Wrist camera" src="/api/camera/wrist.mjpg"/></div>}</section>
   {selected&&scene&&<Inspector item={selected} scene={scene} frames={frame} request={request} onToast={notify} onDelete={deleteSelected} snap={snap} setSnap={setSnap} mode={gizmoMode} setMode={setGizmoMode}/>}
-  <div className="connection">{live.status}</div>{toast&&<div className="toast panel">{toast}</div>}</main>;
+  <div className="connection">{connectionStatus} · {live.status}</div>{toast&&<div className="toast panel">{toast}</div>}{runtimeError&&<div className="runtime-error panel" role="alert"><b>The UI hit an error</b><span>{runtimeError}</span><button onClick={()=>window.location.reload()}>Reload UI</button></div>}</main>;
 }

@@ -35,6 +35,7 @@ def build_scene() -> mujoco.MjModel:
     world.add_light(name="key_light", pos=(0.0, -1.0, 2.5), dir=(0.0, 0.2, -1.0))
     world.add_camera(name="front", pos=(1.4, -1.8, 1.25), xyaxes=(0.79, 0.61, 0, -0.23, 0.30, 0.93), fovy=45)
     world.add_camera(name="top", pos=(0.0, 0.0, 2.5), xyaxes=(1, 0, 0, 0, 1, 0), fovy=50)
+    spec.body("gripper").add_camera(name="wrist", pos=(0.0, 0.025, 0.075), fovy=55)
     for kind, count in OBJECT_POOL_COUNTS.items():
         for index in range(count):
             name = f"pool_{kind}_{index}"

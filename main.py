@@ -1,4 +1,4 @@
-"""Run the SO-101 scene with the dummy sinusoidal controller."""
+"""Run the Sandtable browser workbench or legacy Viser interface."""
 
 import time
 import sys
@@ -8,15 +8,13 @@ from pathlib import Path
 # Allow running directly from a source checkout without installing the package.
 sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 
-from simwrap.controller import DummyController
 from simwrap.sim import Sim
-from simwrap.ui import SimulationUI
 
 
 def main() -> None:
     """Run the simulation with the requested browser interface."""
     parser = argparse.ArgumentParser()
-    parser.add_argument("--ui", choices=("web", "viser"), default="viser")
+    parser.add_argument("--ui", choices=("web", "viser"), default="web")
     parser.add_argument("--port", type=int, default=8080, help="HTTP port for the selected UI (default: 8080)")
     args = parser.parse_args()
     sim = Sim()
@@ -27,11 +25,13 @@ def main() -> None:
         app = create_app(sim)
         print(f"Web UI: http://localhost:{args.port}")
         try:
-            uvicorn.run(app, host="0.0.0.0", port=args.port)
+            uvicorn.run(app, host="127.0.0.1", port=args.port)
         finally:
             app.state.cameras.close()
             sim.close()
         return
+    from simwrap.controller import DummyController
+    from simwrap.ui import SimulationUI
     controller = DummyController(sim)
     ui = SimulationUI(sim, port=args.port)
     controller.start()

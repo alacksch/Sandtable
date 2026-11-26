@@ -10,6 +10,7 @@ class AppState:
         self._lock = threading.Lock()
         self._prompt = ""
         self._running = False
+        self._policy_status = "offline"
 
     def set_prompt(self, prompt: str) -> None:
         """Update the prompt text."""
@@ -25,3 +26,14 @@ class AppState:
         """Return a consistent state snapshot."""
         with self._lock:
             return self._prompt, self._running
+
+    def set_policy(self, *, running: bool, status: str) -> None:
+        """Update policy lifecycle state for API clients."""
+        with self._lock:
+            self._running = running
+            self._policy_status = status
+
+    def policy_status(self) -> str:
+        """Return the current policy lifecycle label."""
+        with self._lock:
+            return self._policy_status
