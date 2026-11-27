@@ -4,9 +4,11 @@ Sandtable is a browser workbench for simulating an SO-101 robot arm in MuJoCo. Y
 
 ## Run it
 
-You need Python 3.10 or newer. From the project folder:
+You need Python 3.10 or newer. From the project folder, create an environment and install the project:
 
 ```powershell
+python -m venv .venv
+.venv\Scripts\Activate.ps1
 python -m pip install -e .
 python main.py --ui web --port 8080
 ```
@@ -17,7 +19,7 @@ Open <http://localhost:8080>. The web interface is the default. The older Viser 
 python main.py --ui viser --port 8080
 ```
 
-To work on the frontend, install Node.js, then run the backend in one terminal and Vite in another:
+To work on the frontend, install Node.js, then run the backend in one terminal. In a second terminal:
 
 ```powershell
 cd web
@@ -26,7 +28,7 @@ $env:VITE_API_PROXY = "http://localhost:8080"
 npm run dev
 ```
 
-Build the production frontend from `web/` with `npm run build`.
+`npm ci` installs the locked frontend dependencies. Build the production frontend from `web/` with `npm run build`.
 
 ## What happens when it runs
 
@@ -45,7 +47,7 @@ Browser (React + Three.js)  ⇄  FastAPI server  ⇄  Sim (MuJoCo)
 
 ## Try a model
 
-The optional adapter supports Elbarbary’s `Elbarbary/so101_smolvla` checkpoint. Install its dependencies in an isolated environment and start Sandtable with that Python:
+The optional adapter supports Elbarbary’s `Elbarbary/so101-smolvla-v4-30k` checkpoint. Install its dependencies in an isolated environment and start Sandtable with that Python:
 
 ```powershell
 uv venv .venv-policy --python python
@@ -75,6 +77,10 @@ pytest -q
 python scripts/soak_sim.py --seconds 30
 python scripts/soak_server.py --seconds 30
 ```
+
+## Git setup
+
+The repository ignores virtual environments, downloaded model files, Python caches, and generated frontend output. Keep credentials and machine-specific settings in ignored `.env` files; use `web/.env.example` as the frontend template. `web/package-lock.json` is committed so frontend installs are reproducible.
 
 From `web/`, `npm run build` type-checks and builds the frontend.
 

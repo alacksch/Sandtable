@@ -116,6 +116,15 @@ def create_app(sim: Sim | None = None, objects: ObjectManager | None = None,
     mesh_lock = threading.Lock()
     mesh_cache: dict[int, bytes] = {}
 
+    @app.get("/api/policy/logs/file")
+    def policy_logs_file() -> FileResponse:
+        """Download the diagnostics file written directly by the policy worker."""
+        path = policy_runner.get_log_path()
+        if not path.is_file():
+            raise HTTPException(status_code=404, detail="No policy diagnostics have been recorded yet")
+        return FileResponse(path, media_type="application/x-ndjson",
+                            filename="policy-diagnostics.jsonl")
+
     def encoded_camera_frame(name: str) -> bytes | None:
         """JPEG-encode only once per rendered frame, shared across feed clients."""
         get_image = getattr(camera_renderer, "get_image", None)

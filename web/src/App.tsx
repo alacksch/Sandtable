@@ -10,6 +10,7 @@ type ObjectDescriptor = {name:string;kind:string;slot:string;size:number[];color
 type LiveState = { active_objects:string[]; object_slots:ObjectDescriptor[]; prompt:string; running:boolean; status:string; policy_status?:string };
 type ArmTelemetry = {joint_state:number[];joint_targets:number[]};
 type ArmActuator = {index:number;actuator_name:string;joint_name:string;unit:string;limited:boolean;control_range:number[]};
+type ControlTab = 'home'|'objects'|'arm'|'cameras'|'session'|'logs';
 
 class CanvasErrorBoundary extends Component<{children:React.ReactNode},{error:Error|null}> {
   state: {error:Error|null} = {error:null};
@@ -198,7 +199,7 @@ function BodyGroup({bodyId, geoms, frames, activeSlots, objectNames, objectBySlo
   return <group ref={bodyRef}>{geoms.map(g=>{const slot=g.name.replace('_geom','');const objectName=objectNames.get(slot)??null;return <GeomMesh key={g.id} geom={g} active={!g.is_pool||activeSlots.has(slot)} object={objectBySlot.get(slot)} objectName={objectName} selected={objectName===selectedName} onSelect={onSelect}/>;})}</group>;
 }
 
-function Scene({data, frames, objectSlots, selectedName, onSelect}:{data:SceneData;frames:React.MutableRefObject<Float32Array|null>;objectSlots:ObjectDescriptor[];selectedName:string|null;onSelect:(name:string|null)=>void}) {
+function Scene({data, frames, objectSlots, selectedName, onSelect, gridVisible}:{data:SceneData;frames:React.MutableRefObject<Float32Array|null>;objectSlots:ObjectDescriptor[];selectedName:string|null;onSelect:(name:string|null)=>void;gridVisible:boolean}) {
   const activeSlots = useMemo(() => new Set(Object.values(data.pool).flatMap(p=>p.names.filter((_,i)=>p.active.includes(p.names[i])))),[data]);
   const slotsFromState=useMemo(()=>new Set(objectSlots.map(item=>item.slot)),[objectSlots]);
   const visibleSlots=useMemo(()=>new Set([...activeSlots,...slotsFromState]),[activeSlots,slotsFromState]);
@@ -207,7 +208,7 @@ function Scene({data, frames, objectSlots, selectedName, onSelect}:{data:SceneDa
   const byBody=useMemo(()=>data.geoms.reduce<Record<number,Geom[]>>((groups,g)=>{(groups[g.body]??=[]).push(g);return groups;},{}),[data]);
   return <>
     {Object.entries(byBody).map(([id,geoms])=><BodyGroup key={id} bodyId={Number(id)} geoms={geoms} frames={frames} activeSlots={visibleSlots} objectNames={objectNames} objectBySlot={objectBySlot} selectedName={selectedName} onSelect={onSelect}/>)}
-    <Grid position={[0,0,.751]} args={[2,2]} cellSize={.1} cellThickness={.5} sectionSize={.5} sectionThickness={1} rotation={[Math.PI/2,0,0]} />
+    {gridVisible&&<Grid position={[0,0,.751]} args={[2,2]} cellSize={.1} cellThickness={.5} sectionSize={.5} sectionThickness={1} rotation={[Math.PI/2,0,0]} />}
   </>;
 }
 
@@ -244,8 +245,8 @@ function InViewObjectsMonitor({objects,scene,frames,onChange}:{objects:ObjectDes
 }
 
 function InViewObjectsList({objects,selectedName,onSelect}:{objects:ObjectDescriptor[];selectedName:string|null;onSelect:(name:string)=>void}) {
-  return <section className="scene-objects panel">
-    <div className="scene-objects-title"><b>IN VIEW</b><span>{objects.length}</span></div>
+  return <section className="scene-objects control-section">
+    <div className="scene-objects-title"><b>In View</b><span>{objects.length}</span></div>
     {objects.length===0?<p>No placed objects in view</p>:<div className="scene-object-rows">{objects.map(item=><button className={`scene-object-row ${selectedName===item.name?'selected':''}`} key={item.name} onClick={()=>onSelect(item.name)}><i className={`shape ${item.kind}`}/><span>{item.name}</span><small>{item.kind}</small></button>)}</div>}
   </section>;
 }
@@ -278,13 +279,13 @@ function Inspector({item,scene,frames,request,onToast,onDelete,snap,setSnap,mode
   const sendColor=(value:string)=>{setColor(value);const hex=value.slice(1);const rgba=[0,2,4].map(i=>parseInt(hex.slice(i,i+2),16)/255);request('update_object',{name:item.name,color:[...rgba,1]}).catch(e=>onToast(e.message));};
   const sendSize=(index:number,value:number)=>{const next=size.map((v,i)=>i===index?value:v);setSize(next);request('update_object',{name:item.name,size:next}).catch(e=>onToast(e.message));};
   const labels=item.kind==='box'?['X half-size','Y half-size','Z half-size']:item.kind==='cylinder'?['Radius','Half-height']:['Radius'];
-  return <aside className="inspector panel"><div className="inspector-head"><div><small>OBJECT INSPECTOR</small><h2>{item.name}</h2></div><button onClick={onDelete}>Delete</button></div><div className="kind-pill">{item.kind}</div>
+  return <section className="inspector control-section"><div className="inspector-head"><div><small>Object Inspector</small><h2>{item.name}</h2></div><button onClick={onDelete}>Delete</button></div><div className="kind-pill">{item.kind}</div>
     <div className="gizmo-options"><button className={mode==='translate'?'chosen':''} onClick={()=>setMode('translate')}>Move</button><button className={mode==='rotate'?'chosen':''} onClick={()=>setMode('rotate')}>Yaw</button><label><input type="checkbox" checked={snap} onChange={e=>setSnap(e.target.checked)}/> Snap to table</label></div>
     <label>Position</label><div className="number-grid">{['X','Y','Z'].map((axis,index)=><input key={axis} aria-label={`Position ${axis}`} type="number" step="0.01" value={position[index].toFixed(3)} onChange={e=>updatePosition(index,Number(e.target.value))}/>)}</div>
     <label>Yaw · degrees</label><div className="yaw-row"><input type="number" step="1" value={yaw.toFixed(1)} onChange={e=>setYaw(Number(e.target.value))}/><button onClick={sendMove}>Move</button></div>
     <label>Color</label><input className="color-input" type="color" value={color} onChange={e=>sendColor(e.target.value)}/>
     {labels.map((label,index)=><label className="range-label" key={label}>{label}<input type="range" min="0.01" max={item.kind==='sphere'?.1:.12} step="0.005" value={size[index]} onChange={e=>sendSize(index,Number(e.target.value))}/><span>{size[index].toFixed(3)} m</span></label>)}
-  </aside>;
+  </section>;
 }
 
 function ArmControlPanel({request,telemetryRef,onToast}:{request:(c:string,e?:Record<string,unknown>)=>Promise<unknown>;telemetryRef:React.MutableRefObject<ArmTelemetry|null>;onToast:(message:string)=>void}) {
@@ -299,20 +300,27 @@ function ArmControlPanel({request,telemetryRef,onToast}:{request:(c:string,e?:Re
   const change=(index:number,value:number)=>{const next=targetRef.current.slice();next[index]=value;targetRef.current=next;setTargets(next);dragging.current=true;if(sendTimer.current!==null)window.clearTimeout(sendTimer.current);sendTimer.current=window.setTimeout(()=>{sendTimer.current=null;send(next);},70);};
   const commit=()=>{if(sendTimer.current!==null){window.clearTimeout(sendTimer.current);sendTimer.current=null;}dragging.current=false;send(targetRef.current);};
   const hold=()=>request('hold_arm').catch(error=>onToast(error instanceof Error?error.message:String(error)));
-  return <aside className="arm-controls panel"><div className="arm-controls-head"><div><small>SIMULATED ARM</small><b>Joint controls</b></div><button onClick={()=>void hold()}>Hold current</button></div>
+  return <section className="arm-controls control-section"><div className="arm-controls-head"><div><small>Simulated Arm</small><b>Joint Controls</b></div><button onClick={()=>void hold()}>Hold Current</button></div>
     {actuators.length===0?<p>Loading arm controls…</p>:actuators.map((actuator,index)=>{const limits=actuator.control_range;const value=targets[index]??actual[index]??0;return <label className="arm-joint" key={actuator.actuator_name}><span>{actuator.joint_name.replaceAll('_',' ')}</span><b>{(value*180/Math.PI).toFixed(0)}°</b><input aria-label={actuator.joint_name.replaceAll('_',' ')} type="range" min={limits[0]} max={limits[1]} step="0.01" value={value} onChange={event=>change(index,Number(event.target.value))} onPointerUp={commit} onKeyUp={commit} onBlur={()=>{if(dragging.current)commit();}}/><small>Actual {(actual[index]??0)*180/Math.PI|0}° · limit {limits[0]*180/Math.PI|0}° to {limits[1]*180/Math.PI|0}°</small></label>;})}
     <p className="arm-control-note">Position targets · values shown in degrees</p>
-  </aside>;
+  </section>;
+}
+
+function PolicyLogsPanel() {
+  return <section className="policy-logs control-section"><div className="section-heading"><h2>Policy Diagnostics</h2><span>Saved on the backend</span></div>
+    <p className="session-description">Policy events append directly to <code>logs/policy-diagnostics.jsonl</code> on the Sandtable machine. The browser does not poll or retain a live copy.</p>
+    <a className="download-log" href="/api/policy/logs/file" download="policy-diagnostics.jsonl">Download diagnostics file</a>
+  </section>;
 }
 
 export function App() {
   const [scene,setScene]=useState<SceneData|null>(null); const [live,setLive]=useState<LiveState>({active_objects:[],object_slots:[],prompt:'',running:false,status:'connecting',policy_status:'offline'});
-  const [prompt,setPrompt]=useState(''); const [paused,setPaused]=useState(false); const [cameraOpen,setCameraOpen]=useState(true); const [placing,setPlacing]=useState<string|null>(null); const [toast,setToast]=useState('');const [selectedName,setSelectedName]=useState<string|null>(null);const [inViewObjects,setInViewObjects]=useState<ObjectDescriptor[]>([]);const [snap,setSnap]=useState(true);const [gizmoMode,setGizmoMode]=useState<'translate'|'rotate'>('translate');const [runtimeError,setRuntimeError]=useState('');const [connectionStatus,setConnectionStatus]=useState('connecting');
+  const [prompt,setPrompt]=useState(''); const [paused,setPaused]=useState(false); const [gridVisible,setGridVisible]=useState(true); const [placing,setPlacing]=useState<string|null>(null); const [toast,setToast]=useState('');const [selectedName,setSelectedName]=useState<string|null>(null);const [inViewObjects,setInViewObjects]=useState<ObjectDescriptor[]>([]);const [snap,setSnap]=useState(true);const [gizmoMode,setGizmoMode]=useState<'translate'|'rotate'>('translate');const [runtimeError,setRuntimeError]=useState('');const [connectionStatus,setConnectionStatus]=useState('connecting');
   const toastTimer=useRef<number|null>(null);
   const notify=useCallback((message:string)=>{setToast(message);if(toastTimer.current!==null)window.clearTimeout(toastTimer.current);toastTimer.current=window.setTimeout(()=>{setToast('');toastTimer.current=null;},2800);},[]);
   const expectedBodyCount=useRef<number|null>(null);
   const armTelemetry=useRef<ArmTelemetry|null>(null);
-  const [armOpen,setArmOpen]=useState(false);
+  const [controlTab,setControlTab]=useState<ControlTab>('home');
   const sessionInput=useRef<HTMLInputElement|null>(null);
   const stableState=useCallback((s:LiveState)=>{setLive(s);setPrompt(s.prompt);setPaused(s.status==='paused');},[]);
   const stableConnection=useCallback((status:string)=>setConnectionStatus(status),[]);
@@ -333,6 +341,7 @@ export function App() {
   const onSpawn=useCallback((name:string)=>{setPlacing(null);setSelectedName(name);notify(`Placed ${name}`);},[notify]);
   useEffect(()=>()=>{if(toastTimer.current!==null)window.clearTimeout(toastTimer.current);},[]);
   useEffect(()=>{if(selectedName&&!live.object_slots.some(item=>item.name===selectedName))setSelectedName(null);},[live.object_slots,selectedName]);
+  useEffect(()=>{if(selectedName)setControlTab('objects');},[selectedName]);
   useEffect(()=>{const timer=window.setTimeout(()=>{if(prompt!==live.prompt)request('set_prompt',{text:prompt}).catch(error=>notify(error instanceof Error?error.message:String(error)));},150);return()=>window.clearTimeout(timer);},[prompt,live.prompt,request,notify]);
   useEffect(()=>{const key=(event:KeyboardEvent)=>{if(event.key==='Escape'){setSelectedName(null);setPlacing(null);return;}if((event.key==='Delete'||event.key==='Backspace')&&selectedName){const target=event.target;if(target instanceof HTMLInputElement||target instanceof HTMLTextAreaElement)return;event.preventDefault();request('delete',{name:selectedName}).then(()=>setSelectedName(null)).catch(e=>notify(e.message));}};window.addEventListener('keydown',key);return()=>window.removeEventListener('keydown',key);},[selectedName,request]);
   const selected=live.object_slots?.find(item=>item.name===selectedName)??null;
@@ -343,16 +352,23 @@ export function App() {
   const loadSession=async(file:File)=>{try{if(file.size>1024*1024)throw new Error('Session file exceeds 1 MB');const session=JSON.parse(await file.text()) as unknown;const response=await fetch('/api/session',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(session)});const result=await response.json() as {detail?:string};if(!response.ok)throw new Error(result.detail??`Session load failed (${response.status})`);setSelectedName(null);setPlacing(null);notify('Session loaded');}catch(error){notify(error instanceof Error?error.message:String(error));}finally{if(sessionInput.current)sessionInput.current.value='';}};
   return <main className="app"><CanvasErrorBoundary><Canvas shadows dpr={[1,1.5]} fallback={<div className="scene-error panel">WebGL is unavailable in this browser.</div>} camera={{position:[1.5,-1.8,1.5],fov:45}} onPointerMissed={()=>{if(!placing)setSelectedName(null);}} onCreated={({camera})=>{camera.up.set(0,0,1);camera.lookAt(0,0,.7);}}>
     <color attach="background" args={['#080c12']} /><ambientLight intensity={1.3}/><directionalLight position={[1,-2,3]} intensity={2.5} castShadow />
-    {scene&&<Suspense fallback={null}><Scene data={scene} frames={frame} objectSlots={live.object_slots??[]} selectedName={selectedName} onSelect={setSelectedName}/><InViewObjectsMonitor objects={live.object_slots??[]} scene={scene} frames={frame} onChange={setInViewObjects}/><PlacementPreview kind={placing} request={request} onSpawn={onSpawn} onToast={notify}/>{selected&&<GhostGizmo item={selected} scene={scene} frames={frame} snap={snap} mode={gizmoMode} request={request} onToast={notify}/>}</Suspense>}
+    {scene&&<Suspense fallback={null}><Scene data={scene} frames={frame} objectSlots={live.object_slots??[]} selectedName={selectedName} onSelect={setSelectedName} gridVisible={gridVisible}/><InViewObjectsMonitor objects={live.object_slots??[]} scene={scene} frames={frame} onChange={setInViewObjects}/><PlacementPreview kind={placing} request={request} onSpawn={onSpawn} onToast={notify}/>{selected&&<GhostGizmo item={selected} scene={scene} frames={frame} snap={snap} mode={gizmoMode} request={request} onToast={notify}/>}</Suspense>}
     <OrbitControls makeDefault target={[0,0,.7]} />
   </Canvas></CanvasErrorBoundary>
+  <div className="workspace-brand"><span className="brand-mark"><i/><i/><i/></span><span><b>Sandtable</b></span></div>
   <header className="prompt panel"><span className={`status ${live.running?'pending':''}`} title={live.policy_status??'Policy offline'}/><span className="policy-label">{(live.policy_status??'offline').toUpperCase()}</span><input value={prompt} onChange={e=>setPrompt(e.target.value)} placeholder="Describe what the robot should do…"/><button className="primary" onClick={runPolicy}>Run</button><button onClick={()=>command('stop')}>Stop</button></header>
-  <aside className="toolbar panel"><button onClick={()=>command('reset')}>↺ Reset</button><button onClick={togglePause}>{paused?'▶ Resume':'Ⅱ Pause'}</button><button onClick={()=>setArmOpen(open=>!open)}>{armOpen?'Close arm':'Arm controls'}</button></aside>
-  <aside className="session-toolbar panel"><button onClick={saveSession}>Save</button><button onClick={()=>sessionInput.current?.click()}>Load</button><input ref={sessionInput} type="file" accept="application/json,.json" hidden onChange={event=>{const file=event.target.files?.[0];if(file)void loadSession(file);}}/></aside>
-  <InViewObjectsList objects={inViewObjects} selectedName={selectedName} onSelect={setSelectedName}/>
-  {armOpen&&<ArmControlPanel request={request} telemetryRef={armTelemetry} onToast={notify}/>}
-  <section className="tray panel"><div className="tray-title"><b>OBJECTS</b><span>{placing?`Click the table to place ${placing}`:'Drag an object onto the table'}</span></div><div className="cards">{(['box','cylinder','sphere'] as const).map(kind=>{const pool=scene?.pool[kind];const count=live.active_objects.filter(n=>n.startsWith(`${kind}_`)).length;return <div className={`card ${pool&&count>=pool.capacity?'disabled':''}`} key={kind} draggable={!!pool&&count<pool.capacity} onDragStart={()=>setPlacing(kind)} onDragEnd={()=>window.setTimeout(()=>setPlacing(null),0)} onClick={()=>pool&&count<pool.capacity&&setPlacing(kind)}><i className={`shape ${kind}`}/><div><b>{kind}</b><small>{count}/{pool?.capacity??10} in scene</small></div></div>;})}</div></section>
-  <section className={`camera panel ${selected?'inspector-open':''}`}><button className="camera-toggle" onClick={()=>setCameraOpen(!cameraOpen)}>CAMERAS <span>{cameraOpen?'⌄':'⌃'}</span></button>{cameraOpen&&<div className="feeds"><img aria-label="Front camera" src="/api/camera/front.mjpg"/><img aria-label="Top camera" src="/api/camera/top.mjpg"/><img aria-label="Wrist camera" src="/api/camera/wrist.mjpg"/></div>}</section>
-  {selected&&scene&&<Inspector item={selected} scene={scene} frames={frame} request={request} onToast={notify} onDelete={deleteSelected} snap={snap} setSnap={setSnap} mode={gizmoMode} setMode={setGizmoMode}/>}
-  <div className="connection">{connectionStatus} · {live.status}</div>{toast&&<div className="toast panel">{toast}</div>}{runtimeError&&<div className="runtime-error panel" role="alert"><b>The UI hit an error</b><span>{runtimeError}</span><button onClick={()=>window.location.reload()}>Reload UI</button></div>}</main>;
+  <aside className="control-panel panel">
+    <div className="control-panel-head"><h1>Control Panel</h1><span className={`connection-state ${connectionStatus==='connected'?'is-connected':'is-disconnected'}`}><i/>{connectionStatus==='connected'?'Connected':'Disconnected'}</span></div>
+    <nav className="control-tabs" role="tablist" aria-label="Control panel sections">{([['home','Home'],['objects','Objects'],['arm','Arm'],['cameras','Cameras'],['session','Session'],['logs','Logs']] as const).map(([tab,label])=><button key={tab} role="tab" aria-selected={controlTab===tab} className={controlTab===tab?'active':''} onClick={()=>setControlTab(tab)}>{label}</button>)}</nav>
+    {controlTab==='home'&&<div className="tab-page">
+      <section className="control-section home-simulation"><div className="section-heading"><h2>Simulation</h2><span>{paused?'Paused':'Physics Active'}</span></div><div className="control-actions"><button onClick={()=>command('reset')}>Reset Scene</button><button onClick={togglePause}>{paused?'Resume Simulation':'Pause Simulation'}</button><button onClick={()=>setGridVisible(visible=>!visible)} aria-pressed={gridVisible}>{gridVisible?'Hide Grid':'Show Grid'}</button><button onClick={()=>setControlTab('arm')}>Arm Controls</button></div></section>
+    </div>}
+    {controlTab==='objects'&&<div className="tab-page"><InViewObjectsList objects={inViewObjects} selectedName={selectedName} onSelect={setSelectedName}/>{selected&&scene&&<Inspector item={selected} scene={scene} frames={frame} request={request} onToast={notify} onDelete={deleteSelected} snap={snap} setSnap={setSnap} mode={gizmoMode} setMode={setGizmoMode}/>}</div>}
+    {controlTab==='arm'&&<div className="tab-page"><ArmControlPanel request={request} telemetryRef={armTelemetry} onToast={notify}/></div>}
+    {controlTab==='cameras'&&<div className="tab-page"><section className="camera control-section"><div className="section-heading"><h2>Camera Feeds</h2></div><div className="feeds camera-viewer"><img aria-label="Front Camera" title="Front Camera" src="/api/camera/front.mjpg"/><img aria-label="Top Camera" title="Top Camera" src="/api/camera/top.mjpg"/><img aria-label="Wrist Camera" title="Wrist Camera" src="/api/camera/wrist.mjpg"/></div></section></div>}
+    {controlTab==='session'&&<div className="tab-page"><section className="control-section"><div className="section-heading"><h2>Environment</h2><span>Save Or Restore</span></div><p className="session-description">Keep a copy of the objects and their current positions, or restore a saved setup.</p><div className="session-list"><button className="session-action" onClick={saveSession}><b>Save Environment</b><small>Download Current Scene</small></button><button className="session-action" onClick={()=>sessionInput.current?.click()}><b>Import Environment</b><small>Load A Saved Scene</small></button><input ref={sessionInput} type="file" accept="application/json,.json" hidden onChange={event=>{const file=event.target.files?.[0];if(file)void loadSession(file);}}/></div></section></div>}
+    {controlTab==='logs'&&<div className="tab-page"><PolicyLogsPanel/></div>}
+  </aside>
+  <section className="tray panel"><div className="tray-title"><b>Objects</b><span>{placing?`Click the table to place ${placing}`:'Drag an object onto the table'}</span></div><div className="cards">{(['box','cylinder','sphere'] as const).map(kind=>{const pool=scene?.pool[kind];const count=live.active_objects.filter(n=>n.startsWith(`${kind}_`)).length;return <div className={`card ${pool&&count>=pool.capacity?'disabled':''}`} key={kind} draggable={!!pool&&count<pool.capacity} onDragStart={()=>setPlacing(kind)} onDragEnd={()=>window.setTimeout(()=>setPlacing(null),0)} onClick={()=>pool&&count<pool.capacity&&setPlacing(kind)}><i className={`shape ${kind}`}/><div><b>{kind}</b><small>{count}/{pool?.capacity??10} in scene</small></div></div>;})}</div></section>
+  {toast&&<div className="toast panel">{toast}</div>}{runtimeError&&<div className="runtime-error panel" role="alert"><b>The UI hit an error</b><span>{runtimeError}</span><button onClick={()=>window.location.reload()}>Reload UI</button></div>}</main>;
 }

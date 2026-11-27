@@ -11,6 +11,7 @@ dist/
 # Virtual environments and local model/runtime caches
 .venv/
 .venv-*/
+.venv-policy/
 venv/
 .model-cache/
 .uv-cache/
@@ -27,6 +28,9 @@ web/.env.*
 web/node_modules/
 web/dist/
 web/*.tsbuildinfo
+
+# Runtime logs and local diagnostics
+/logs/
 
 # Editor and operating system files
 .idea/
